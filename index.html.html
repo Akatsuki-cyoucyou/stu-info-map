@@ -21,20 +21,15 @@
             }
           },
           fontFamily: {
-            sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', '"PingFang SC"', '"Microsoft YaHei"', 'sans-serif']
+            sans: ['-apple-system', 'BlinkMacSystemFont', '"PingFang SC"', '"Microsoft YaHei"', '"Helvetica Neue"', 'sans-serif']
           }
         }
       }
     };
   </script>
 
-  <!-- Google Font: Inter -->
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-
-  <!-- Leaflet CSS -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <!-- Leaflet CSS (国内 BootCDN 源) -->
+  <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
 
   <style>
     /* 自定义滚动条样式，保持界面清爽 */
@@ -427,8 +422,8 @@
     </div>
   </div>
 
-  <!-- Leaflet JS -->
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <!-- Leaflet JS (国内 BootCDN 源) -->
+  <script src="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 
   <script>
     (function () {
@@ -487,34 +482,29 @@
         },
         {
           id: 1003,
-          title: '苏州工业园区 AP 英语与学术写作',
-          content: '跨城周末集中辅导项目（近苏州园区高铁站），国际部高二学生冲刺 AP 英语文学与托福写作，交通补贴另计。',
+          title: '苏州工业园区跨城竞赛集训',
+          content: '跨城周末集中辅导项目（近苏州园区高铁站），高中物理/数学竞赛冲刺集训，交通补贴另计。',
           address: '江苏省苏州市工业园区现代大道',
           lat: 31.3190,
           lng: 120.7200,
-          subject: '英语',
+          subject: '数学',
           grade: '高中',
           timeSlot: '周末白天',
           fee: 500,
           gender: '不限',
-          isBilingual: true,
+          isBilingual: false,
           isInternational: true
         }
       ];
 
       // =========================================================================
-      // 2. 应用全局状态
+      // 2. 应用状态与地图实例引用
       // =========================================================================
       const state = {
         origin: { ...DEFAULT_ORIGIN },
         records: [],
         filteredRecords: [],
         searchKeyword: '',
-        selectedId: null,
-        pendingDeleteId: null,
-        isPickingOrigin: false,
-
-        // 当前生效的 7 维度筛选条件
         filters: {
           subject: '全部',
           grade: '全部',
@@ -524,88 +514,24 @@
           bilingual: '不限',
           international: '不限'
         },
-        // 弹窗内临时编辑的筛选条件
-        draftFilters: null,
-
-        // 录入表单的选中坐标
-        pickerCoord: { lat: null, lng: null }
+        draftFilters: {},
+        selectedId: null,
+        isPickingOrigin: false,
+        pickerCoord: { lat: null, lng: null },
+        pendingDeleteId: null
       };
 
-      // Leaflet 地图对象引用
       let mainMap = null;
-      let originMarker = null;
       let markersLayer = null;
+      const markerMap = new Map();
+      let originMarker = null;
       let routePolyline = null;
-      let markerMap = new Map();
-
       let pickerMap = null;
       let pickerMarker = null;
-
-      // =========================================================================
-      // 3. 工具函数：距离、交通时长、Toast、HTML 转义
-      // =========================================================================
-      function escapeHtml(str) {
-        if (str === null || str === undefined) return '';
-        return String(str)
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;')
-          .replace(/'/g, '&#39;');
-      }
-
-      /**
-       * Haversine 公式计算两点间球面直线距离（单位：km）
-       */
-      function calculateHaversineKm(lat1, lng1, lat2, lng2) {
-        const toRad = (deg) => (deg * Math.PI) / 180;
-        const R = 6371;
-        const dLat = toRad(lat2 - lat1);
-        const dLng = toRad(lng2 - lng1);
-        const a =
-          Math.sin(dLat / 2) ** 2 +
-          Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
-        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      }
-
-      /**
-       * 根据估算路网里程（直线 * 1.25）推算 5 种交通工具耗时
-       */
-      function estimateTransportDurations(km) {
-        const formatTime = (hours) => {
-          const totalMin = Math.round(hours * 60);
-          if (totalMin < 1) return '1分';
-          if (totalMin < 60) return `${totalMin}分`;
-          const h = Math.floor(totalMin / 60);
-          const m = totalMin % 60;
-          return m > 0 ? `${h}时${m}分` : `${h}小时`;
-        };
-
-        return {
-          walk: km > 50 ? '过远' : formatTime(km / 4.5),
-          bike: km > 100 ? '过远' : formatTime(km / 14),
-          ebike: km > 80 ? '超续航' : formatTime(km / 25),
-          car: formatTime(km / (km > 30 ? 65 : 30)),
-          hsr: km < 30 ? '不适用' : formatTime(km / 250 + 0.65)
-        };
-      }
-
       let toastTimer = null;
-      function showToast(message) {
-        const box = document.getElementById('toastBox');
-        const textEl = document.getElementById('toastText');
-        textEl.textContent = message;
-        box.classList.remove('opacity-0', '-translate-y-2');
-        box.classList.add('opacity-100', 'translate-y-0');
-        clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => {
-          box.classList.remove('opacity-100', 'translate-y-0');
-          box.classList.add('opacity-0', '-translate-y-2');
-        }, 2600);
-      }
 
       // =========================================================================
-      // 4. 本地持久化存储
+      // 3. 本地数据持久化（localStorage）
       // =========================================================================
       function loadRecords() {
         try {
@@ -618,10 +544,9 @@
             }
           }
         } catch (err) {
-          console.warn('读取本地缓存失败，已使用示例数据:', err);
+          console.warn('读取本地缓存失败，已回退至示例数据:', err);
         }
-        state.records = [...DEFAULT_RECORDS];
-        saveRecords();
+        state.records = DEFAULT_RECORDS.map((item) => ({ ...item }));
       }
 
       function saveRecords() {
@@ -629,11 +554,70 @@
           localStorage.setItem(STORAGE_KEY, JSON.stringify(state.records));
         } catch (err) {
           console.warn('保存本地缓存失败:', err);
+          showToast('本地存储空间不足或被浏览器禁用');
         }
       }
 
       // =========================================================================
-      // 5. 初始化主地图（Leaflet + CartoDB Voyager 瓦片）
+      // 4. 通用工具函数（防 XSS 转义、Toast 提示、Haversine 距离、交通时长估算）
+      // =========================================================================
+      function escapeHtml(str) {
+        return String(str ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function showToast(message) {
+        const box = document.getElementById('toastBox');
+        const textEl = document.getElementById('toastText');
+        if (!box || !textEl) return;
+
+        textEl.textContent = message;
+        box.classList.remove('opacity-0', '-translate-y-2');
+        box.classList.add('opacity-100', 'translate-y-0');
+
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => {
+          box.classList.remove('opacity-100', 'translate-y-0');
+          box.classList.add('opacity-0', '-translate-y-2');
+        }, 2600);
+      }
+
+      function calculateHaversineKm(lat1, lng1, lat2, lng2) {
+        const toRad = (deg) => (deg * Math.PI) / 180;
+        const R = 6371;
+        const dLat = toRad(lat2 - lat1);
+        const dLng = toRad(lng2 - lng1);
+        const a =
+          Math.sin(dLat / 2) ** 2 +
+          Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      }
+
+      function estimateTransportDurations(km) {
+        const formatTime = (hours) => {
+          const totalMinutes = Math.round(hours * 60);
+          if (totalMinutes < 1) return '1分';
+          if (totalMinutes < 60) return `${totalMinutes}分`;
+          const h = Math.floor(totalMinutes / 60);
+          const m = totalMinutes % 60;
+          return m > 0 ? `${h}时${m}分` : `${h}小时`;
+        };
+
+        return {
+          walk: km > 50 ? '过远' : formatTime(km / 4.5),
+          bike: km > 100 ? '过远' : formatTime(km / 14),
+          ebike: km > 80 ? '超续航' : formatTime(km / 25),
+          car: formatTime(km / (km > 30 ? 65 : 30)),
+          hsr: km < 30 ? '不适用' : formatTime(km / 250 + 0.65)
+        };
+      }
+
+      // =========================================================================
+      // 5. 初始化主地图（Leaflet + 高德地图中文标准导航底图）
       // =========================================================================
       function initMainMap() {
         mainMap = L.map('mainMap', {
@@ -642,11 +626,11 @@
           zoomControl: true
         });
 
-        // 使用无需 API Key 的 CartoDB Voyager 现代风格瓦片（并附带 OSM 备用属性）
-        L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-          attribution: '&copy; OpenStreetMap &copy; CARTO',
-          subdomains: 'abcd',
-          maxZoom: 19
+        // 使用高德地图标准中文导航瓦片底图（国内直连，带彩色路网、小区与地铁站）
+        L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', {
+          attribution: '&copy; 高德地图',
+          subdomains: ['1', '2', '3', '4'],
+          maxZoom: 18
         }).addTo(mainMap);
 
         markersLayer = L.layerGroup().addTo(mainMap);
@@ -1137,10 +1121,10 @@
               center: [state.origin.lat, state.origin.lng],
               zoom: 12
             });
-            L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-              attribution: '&copy; OpenStreetMap &copy; CARTO',
-              subdomains: 'abcd',
-              maxZoom: 19
+            L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', {
+              attribution: '&copy; 高德地图',
+              subdomains: ['1', '2', '3', '4'],
+              maxZoom: 18
             }).addTo(pickerMap);
 
             pickerMap.on('click', (e) => {

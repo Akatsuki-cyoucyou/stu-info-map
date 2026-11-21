@@ -1,0 +1,3059 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>信息检索与路线评估</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#e8f3ff',
+              100: '#cce4ff',
+              500: '#1677ff',
+              600: '#0958d9',
+              700: '#003eb3'
+            }
+          },
+          fontFamily: {
+            sans: ['-apple-system', 'BlinkMacSystemFont', '"PingFang SC"', '"Microsoft YaHei"', '"Helvetica Neue"', 'sans-serif']
+          }
+        }
+      }
+    };
+  </script>
+
+  <!-- Leaflet CSS (国内 BootCDN 源) -->
+  <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+
+  <style>
+    /* 自定义滚动条 */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 9999px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #94a3b8;
+    }
+
+    /* 起点脉冲动画标记 */
+    .origin-pulse-wrapper {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .origin-pulse-ring {
+      position: absolute;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: rgba(16, 185, 129, 0.35);
+      animation: originPulse 2s infinite ease-out;
+    }
+    .origin-dot {
+      position: relative;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #10b981;
+      border: 3px solid #ffffff;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+      z-index: 2;
+    }
+    @keyframes originPulse {
+      0% { transform: scale(0.6); opacity: 0.9; }
+      100% { transform: scale(1.8); opacity: 0; }
+    }
+
+    /* 目标点自定义气泡标记 */
+    .custom-marker-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      background: #ffffff;
+      color: #1e293b;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1.5px solid #cbd5e1;
+      box-shadow: 0 4px 10px rgba(15, 23, 42, 0.14);
+      transform: translate(-50%, -100%);
+      transition: all 0.2s ease;
+      cursor: pointer;
+    }
+    .custom-marker-pill::after {
+      content: '';
+      position: absolute;
+      bottom: -6px;
+      left: 50%;
+      transform: translateX(-50%);
+      border-width: 6px 5px 0 5px;
+      border-style: solid;
+      border-color: #ffffff transparent transparent transparent;
+    }
+    .custom-marker-pill.active {
+      background: #1677ff;
+      color: #ffffff;
+      border-color: #0958d9;
+      box-shadow: 0 6px 16px rgba(22, 119, 255, 0.4);
+      transform: translate(-50%, -110%) scale(1.06);
+      z-index: 1000 !important;
+    }
+    .custom-marker-pill.active::after {
+      border-color: #1677ff transparent transparent transparent;
+    }
+
+    /* 路线折线动态流动效果 */
+    .route-polyline-animated {
+      stroke-dasharray: 10, 10;
+      animation: dashFlow 1s linear infinite;
+    }
+    @keyframes dashFlow {
+      from { stroke-dashoffset: 20; }
+      to { stroke-dashoffset: 0; }
+    }
+
+    /* 选点模式鼠标指针 */
+    .cursor-crosshair-map {
+      cursor: crosshair !important;
+    }
+
+    /* 确保 Leaflet 容器层级不遮挡弹窗 */
+    .leaflet-container {
+      z-index: 1;
+      font-family: inherit;
+    }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-800 antialiased overflow-hidden select-none sm:select-auto">
+
+  <!-- 全局主容器：移动端上下布局（地图在上，列表在下），桌面端左右分栏（列表在左，地图在右） -->
+  <div class="flex flex-col lg:flex-row h-screen w-screen overflow-hidden">
+
+    <!-- ==================== 右侧（移动端上方）：交互式地图区域 ==================== -->
+    <main class="order-1 lg:order-2 relative w-full h-[38vh] sm:h-[42vh] lg:h-full lg:flex-1 bg-slate-200 flex-shrink-0">
+      <div id="mainMap" class="w-full h-full"></div>
+
+      <!-- 地图顶部悬浮工具栏：起点控制 -->
+      <div class="absolute top-3 left-3 right-3 sm:left-auto sm:right-4 z-[400] flex flex-wrap items-center justify-end gap-2 pointer-events-none">
+        <!-- 当前起点坐标状态指示（点击可添加/切换常用起点） -->
+        <button id="btnManageOrigin" type="button"
+          class="pointer-events-auto flex items-center gap-2 bg-white/95 hover:bg-slate-50 active:scale-95 backdrop-blur px-3 py-2 rounded-xl shadow-md border border-slate-200/80 text-xs text-slate-600 transition">
+          <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block flex-shrink-0"></span>
+          <span class="truncate max-w-[140px] sm:max-w-[200px]">起点：<strong id="originLabel" class="text-slate-800 font-semibold">杭州市中心</strong></span>
+          <span class="text-[11px] text-brand-600 font-medium flex-shrink-0">管理 ▾</span>
+        </button>
+
+        <!-- 获取浏览器定位按钮 -->
+        <button id="btnLocateMe" type="button"
+          class="pointer-events-auto flex items-center gap-1.5 bg-white/95 hover:bg-slate-50 active:scale-95 text-slate-700 px-3 py-2 rounded-xl shadow-md border border-slate-200/80 text-xs font-medium transition">
+          <svg class="w-4 h-4 text-brand-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 2v2m0 16v2m10-10h-2M4 12H2m15.364-5.364l-1.414 1.414M8.05 15.95l-1.414 1.414m0-11.314l1.414 1.414m7.9 7.9l1.414 1.414M12 8a4 4 0 100 8 4 4 0 000-8z"/>
+          </svg>
+          <span>当前定位</span>
+        </button>
+
+        <!-- 点击地图重设起点按钮 -->
+        <button id="btnPickOrigin" type="button"
+          class="pointer-events-auto flex items-center gap-1.5 bg-white/95 hover:bg-slate-50 active:scale-95 text-slate-700 px-3 py-2 rounded-xl shadow-md border border-slate-200/80 text-xs font-medium transition">
+          <svg class="w-4 h-4 text-emerald-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M17.657 16.657L13.414 20.9a2 2 0 01-2.828 0l-4.243-4.243a8 8 0 1111.314 0z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
+          </svg>
+          <span id="btnPickOriginText">点图设起点</span>
+        </button>
+      </div>
+
+      <!-- 重设起点模式提示条 -->
+      <div id="pickOriginBanner" class="hidden absolute bottom-4 left-1/2 -translate-x-1/2 z-[400] bg-slate-900/90 text-white px-4 py-2.5 rounded-full shadow-lg text-xs sm:text-sm flex items-center gap-3 whitespace-nowrap">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+        <span>请在地图上点击任意位置作为新起点</span>
+        <button id="btnCancelPickOrigin" type="button" class="text-slate-300 hover:text-white underline ml-1">取消</button>
+      </div>
+
+      <!-- 地铁直达/换乘详细路线悬浮面板（选中卡片时展示） -->
+      <div id="metroRoutePanel" class="hidden absolute bottom-3 left-3 right-3 sm:right-auto sm:w-[360px] z-[420] bg-white/95 backdrop-blur rounded-2xl shadow-xl border border-slate-200/90 overflow-hidden flex flex-col max-h-[55%] lg:max-h-[68%]">
+        <div class="px-3.5 py-2.5 bg-slate-50/90 border-b border-slate-200/70 flex items-center justify-between gap-2 flex-shrink-0">
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="w-6 h-6 rounded-lg bg-brand-500 text-white flex items-center justify-center text-xs font-bold flex-shrink-0">🚇</span>
+            <div class="min-w-0">
+              <div id="metroPanelTitle" class="text-xs font-bold text-slate-900 truncate">地铁路线规划</div>
+              <div id="metroPanelSub" class="text-[11px] text-slate-500 truncate">正在计算最优换乘方案...</div>
+            </div>
+          </div>
+          <button id="btnCloseMetroPanel" type="button" title="收起路线详情"
+            class="w-7 h-7 rounded-lg hover:bg-slate-200/70 text-slate-400 hover:text-slate-600 flex items-center justify-center text-xs flex-shrink-0 transition">
+            ✕
+          </button>
+        </div>
+        <div id="metroPanelBody" class="p-3.5 overflow-y-auto space-y-2.5 text-xs flex-1">
+          <!-- 逐步换乘指引由 JS 动态渲染 -->
+        </div>
+        <div class="px-3.5 py-2 bg-slate-50/80 border-t border-slate-100 flex items-center justify-between gap-2 flex-shrink-0">
+          <span class="text-[10px] text-slate-400">基于内置地铁网估算，实际发车以实时为准</span>
+          <a id="btnOpenGaodeNav" href="#" target="_blank" rel="noopener noreferrer"
+            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-brand-50 hover:bg-brand-100 text-brand-600 text-[11px] font-semibold transition whitespace-nowrap">
+            高德实时导航 ↗
+          </a>
+        </div>
+      </div>
+    </main>
+
+    <!-- ==================== 左侧（移动端下方）：检索、筛选与列表区域 ==================== -->
+    <aside class="order-2 lg:order-1 w-full lg:w-[460px] xl:w-[500px] h-[62vh] sm:h-[58vh] lg:h-full flex flex-col bg-slate-50 border-t lg:border-t-0 lg:border-r border-slate-200 shadow-sm z-10 overflow-hidden">
+
+      <!-- 顶部标题与录入按钮 -->
+      <header class="bg-white px-4 pt-3.5 pb-3 border-b border-slate-200/80 flex-shrink-0">
+        <div class="flex items-center justify-between gap-2 mb-3">
+          <div class="flex items-center gap-2">
+            <div class="w-8 h-8 rounded-xl bg-brand-500 text-white flex items-center justify-center shadow-sm">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/>
+              </svg>
+            </div>
+            <div>
+              <h1 class="text-base font-bold text-slate-900 leading-tight">信息检索与路线评估</h1>
+              <p class="text-[11px] text-slate-400 leading-tight mt-0.5">多维筛选 · 6种交通时长 · 地图路线联动</p>
+            </div>
+          </div>
+
+          <button id="btnOpenInput" type="button"
+            class="flex items-center gap-1 bg-brand-500 hover:bg-brand-600 active:scale-95 text-white px-3.5 py-2 rounded-xl text-xs font-semibold shadow-sm transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/>
+            </svg>
+            <span>录入信息</span>
+          </button>
+        </div>
+
+        <!-- 搜索框与筛选按钮行 -->
+        <div class="flex items-center gap-2">
+          <div class="relative flex-1">
+            <svg class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/>
+            </svg>
+            <input id="searchInput" type="text" placeholder="检索标题、正文、地址、地区、学科..."
+              class="w-full bg-slate-100 hover:bg-slate-200/70 focus:bg-white border border-transparent focus:border-brand-500 rounded-xl pl-9 pr-8 py-2 text-sm text-slate-800 placeholder-slate-400 outline-none transition" />
+            <button id="btnClearSearch" type="button" title="清除搜索"
+              class="hidden absolute right-2 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-slate-300/80 hover:bg-slate-400 text-white flex items-center justify-center text-xs transition">
+              ✕
+            </button>
+          </div>
+
+          <button id="btnOpenFilter" type="button"
+            class="relative flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium transition flex-shrink-0">
+            <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/>
+            </svg>
+            <span>筛选</span>
+            <span id="filterCountBadge" class="hidden min-w-[18px] h-[18px] px-1 rounded-full bg-brand-500 text-white text-[11px] font-bold flex items-center justify-center">0</span>
+          </button>
+        </div>
+
+        <!-- 已选筛选条件快捷预览条 -->
+        <div id="activeFilterSummary" class="hidden mt-2.5 flex items-center gap-1.5 flex-wrap"></div>
+      </header>
+
+      <!-- 结果统计条 -->
+      <div class="px-4 py-2 bg-slate-100/80 border-b border-slate-200/70 flex items-center justify-between gap-2 text-xs text-slate-500 flex-shrink-0">
+        <span>已筛出 <strong id="resultCount" class="text-slate-800">0</strong> / 共 <strong id="totalRecordCount" class="text-slate-700">0</strong> 条</span>
+        <button id="btnOpenAudit" type="button"
+          class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white hover:bg-brand-50 border border-slate-200 hover:border-brand-200 text-brand-600 font-medium shadow-sm transition active:scale-95">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/>
+          </svg>
+          <span>核对与比对</span>
+        </button>
+      </div>
+
+      <!-- 可滚动信息卡片列表 -->
+      <div id="cardListContainer" class="flex-1 overflow-y-auto p-3.5 space-y-3">
+        <!-- 卡片将通过 JS 动态渲染 -->
+      </div>
+    </aside>
+  </div>
+
+  <!-- ==================== 弹窗 1：9 维度多条件筛选 ==================== -->
+  <div id="filterModal" class="hidden fixed inset-0 z-[1000] bg-slate-900/50 backdrop-blur-[2px] flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div class="bg-white w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col max-h-[88vh] overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+        <div>
+          <h2 class="text-base font-bold text-slate-900">多维度条件筛选</h2>
+          <p class="text-xs text-slate-400 mt-0.5">支持 9 个维度组合精确检索</p>
+        </div>
+        <button id="btnCloseFilter" type="button" class="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center transition">✕</button>
+      </div>
+
+      <div id="filterModalBody" class="p-5 overflow-y-auto space-y-5 flex-1">
+        <!-- 由 JS 渲染筛选维度 -->
+      </div>
+
+      <div class="px-5 py-3.5 border-t border-slate-100 bg-slate-50/70 flex items-center gap-3">
+        <button id="btnResetFilter" type="button"
+          class="flex-1 py-2.5 rounded-xl bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 text-sm font-medium transition">
+          重置条件
+        </button>
+        <button id="btnApplyFilter" type="button"
+          class="flex-1 py-2.5 rounded-xl bg-brand-500 hover:bg-brand-600 text-white text-sm font-semibold shadow-sm transition">
+          确认筛选
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 弹窗 2：手动粘贴录入 + 批量导入 + 地图选点 ==================== -->
+  <div id="inputModal" class="hidden fixed inset-0 z-[1000] bg-slate-900/50 backdrop-blur-[2px] flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div class="bg-white w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+        <div>
+          <h2 class="text-base font-bold text-slate-900">手动粘贴 / 录入信息</h2>
+          <p class="text-xs text-slate-400 mt-0.5">支持粘贴多条排单文字批量一键导入，或单条识别后点图落点</p>
+        </div>
+        <button id="btnCloseInput" type="button" class="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center transition">✕</button>
+      </div>
+
+      <div class="p-5 overflow-y-auto space-y-4 flex-1">
+        <!-- 1. 粘贴原文智能识别区 -->
+        <div class="bg-brand-50/60 border border-brand-100 rounded-xl p-3.5">
+          <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <label for="formRawText" class="text-xs font-semibold text-brand-700">粘贴单条或多条订单文字（自动识别并生成筛选项）</label>
+            <div class="flex items-center gap-2">
+              <button id="btnParseText" type="button"
+                class="px-2.5 py-1 rounded-lg bg-white border border-brand-200 hover:bg-brand-50 text-brand-600 text-xs font-medium shadow-sm transition active:scale-95">
+                ✨ 识别单条微调
+              </button>
+              <button id="btnBatchImport" type="button"
+                class="px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-xs font-semibold shadow-sm transition active:scale-95">
+                ⚡ 一键导入
+              </button>
+            </div>
+          </div>
+          <textarea id="formRawText" rows="6"
+            placeholder="直接粘贴 1 条或多条订单文字，点右上角「⚡ 一键导入」即可完成，无需手动填写下方表单：&#10;#可打折&#10;编号：2026111402&#10;地址：余杭区湖山帝景湾南苑&#10;年级: 二年级  科目：英语&#10;补习时间：周三19:00-21:00 或 时间协商&#10;提供时薪：浙大120/h,其他一本学校70-80/h"
+            class="w-full bg-white border border-slate-200 focus:border-brand-500 rounded-lg p-2.5 text-sm text-slate-700 placeholder-slate-400 outline-none resize-y transition"></textarea>
+          <p class="text-[11px] text-slate-500 mt-1.5">提示：已优化时间识别，支持自动区分白天/晚间（含 18:00 后及放学后）与时间灵活/协商。</p>
+        </div>
+
+        <!-- 折叠/展开手动微调开关 -->
+        <button id="btnToggleManualEdit" type="button"
+          class="w-full py-2 px-3 rounded-xl bg-slate-100 hover:bg-slate-200/80 text-slate-600 text-xs font-medium flex items-center justify-center gap-1.5 transition">
+          <span id="toggleManualEditText">展开手动微调 / 地图精准选点 ▾</span>
+        </button>
+
+        <!-- 可折叠的手动核对与兜底区域（默认收起） -->
+        <div id="manualEditSection" class="hidden space-y-4 pt-2 border-t border-slate-100">
+          <!-- 2. 基础信息行 -->
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="sm:col-span-2">
+              <label for="formTitle" class="block text-xs font-medium text-slate-600 mb-1">信息标题 <span class="text-slate-400 font-normal">（选填，留空自动生成）</span></label>
+              <input id="formTitle" type="text" placeholder="留空则自动生成，如：余杭区 二年级英语"
+                class="w-full bg-slate-50 focus:bg-white border border-slate-200 focus:border-brand-500 rounded-lg px-3 py-2 text-sm outline-none transition" />
+            </div>
+            <div>
+              <label for="formFee" class="block text-xs font-medium text-slate-600 mb-1">费用（元/小时）</label>
+              <input id="formFee" type="number" min="0" placeholder="如：120"
+                class="w-full bg-slate-50 focus:bg-white border border-slate-200 focus:border-brand-500 rounded-lg px-3 py-2 text-sm outline-none transition" />
+            </div>
+          </div>
+
+          <!-- 3. 学科、年级、时间、性别 -->
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div>
+              <label for="formSubject" class="block text-xs font-medium text-slate-600 mb-1">学科科目</label>
+              <select id="formSubject" class="w-full bg-slate-50 focus:bg-white border border-slate-200 focus:border-brand-500 rounded-lg px-2.5 py-2 text-sm outline-none"></select>
+            </div>
+            <div>
+              <label for="formGrade" class="block text-xs font-medium text-slate-600 mb-1">年级段</label>
+              <select id="formGrade" class="w-full bg-slate-50 focus:bg-white border border-slate-200 focus:border-brand-500 rounded-lg px-2.5 py-2 text-sm outline-none"></select>
+            </div>
+            <div>
+              <label for="formTimeSlot" class="block text-xs font-medium text-slate-600 mb-1">时间段</label>
+              <select id="formTimeSlot" class="w-full bg-slate-50 focus:bg-white border border-slate-200 focus:border-brand-500 rounded-lg px-2.5 py-2 text-sm outline-none"></select>
+            </div>
+            <div>
+              <label for="formGender" class="block text-xs font-medium text-slate-600 mb-1">性别要求</label>
+              <select id="formGender" class="w-full bg-slate-50 focus:bg-white border border-slate-200 focus:border-brand-500 rounded-lg px-2.5 py-2 text-sm outline-none">
+                <option value="不限">不限</option>
+                <option value="男">男</option>
+                <option value="女">女</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- 4. 师资身份与所属地区 -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label for="formTeacherType" class="block text-xs font-medium text-slate-600 mb-1">师资身份要求</label>
+              <select id="formTeacherType" class="w-full bg-slate-50 focus:bg-white border border-slate-200 focus:border-brand-500 rounded-lg px-2.5 py-2 text-sm outline-none">
+                <option value="不限">不限</option>
+                <option value="专职">专职</option>
+                <option value="大学生">大学生</option>
+              </select>
+            </div>
+            <div>
+              <label for="formRegion" class="block text-xs font-medium text-slate-600 mb-1">所属地区（省/市/区县）</label>
+              <input id="formRegion" type="text" placeholder="如：余杭区、杭州市萧山区"
+                class="w-full bg-slate-50 focus:bg-white border border-slate-200 focus:border-brand-500 rounded-lg px-3 py-2 text-sm outline-none transition" />
+            </div>
+          </div>
+
+          <!-- 5. 详细地址与特色标签开关 -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+            <div>
+              <label for="formAddress" class="block text-xs font-medium text-slate-600 mb-1">详细地点描述</label>
+              <input id="formAddress" type="text" placeholder="如：余杭区湖山帝景湾南苑"
+                class="w-full bg-slate-50 focus:bg-white border border-slate-200 focus:border-brand-500 rounded-lg px-3 py-2 text-sm outline-none transition" />
+            </div>
+            <div class="flex items-center gap-4 pb-1.5">
+              <label class="inline-flex items-center gap-2 cursor-pointer text-xs font-medium text-slate-700">
+                <input id="formBilingual" type="checkbox" class="w-4 h-4 rounded text-brand-500 border-slate-300 focus:ring-brand-500" />
+                <span>双语要求</span>
+              </label>
+              <label class="inline-flex items-center gap-2 cursor-pointer text-xs font-medium text-slate-700">
+                <input id="formInternational" type="checkbox" class="w-4 h-4 rounded text-brand-500 border-slate-300 focus:ring-brand-500" />
+                <span>国际课程 / 学校</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- 6. 内置选点小地图 -->
+          <div>
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="text-xs font-medium text-slate-600">地图精准落点（若已填常见城市/区县可自动匹配）</span>
+              <span id="formCoordStatus" class="text-xs text-slate-400">点击下方地图选取精准坐标</span>
+            </div>
+            <div id="pickerMap" class="w-full h-44 rounded-xl border border-slate-200 overflow-hidden bg-slate-100"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="px-5 py-3.5 border-t border-slate-100 bg-slate-50/70 flex items-center gap-3">
+        <button id="btnCancelInput" type="button"
+          class="flex-1 py-2.5 rounded-xl bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 text-sm font-medium transition">
+          取消
+        </button>
+        <button id="btnSaveRecord" type="button"
+          class="hidden flex-1 py-2.5 rounded-xl bg-brand-500 hover:bg-brand-600 text-white text-sm font-semibold shadow-sm transition">
+          保存手动修改
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 弹窗 3：自定义与常用起点管理 ==================== -->
+  <div id="originModal" class="hidden fixed inset-0 z-[1050] bg-slate-900/50 backdrop-blur-[2px] flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div class="bg-white w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col max-h-[85vh] overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+        <div>
+          <h2 class="text-base font-bold text-slate-900">自定义 / 常用起点管理</h2>
+          <p class="text-xs text-slate-400 mt-0.5">添加并保存你的常用出发点，随时一键切换</p>
+        </div>
+        <button id="btnCloseOrigin" type="button" class="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center transition">✕</button>
+      </div>
+
+      <div class="p-5 overflow-y-auto space-y-4 flex-1">
+        <!-- 新增常用起点表单 -->
+        <div class="bg-emerald-50/70 border border-emerald-100 rounded-xl p-3.5 space-y-2.5">
+          <label for="originNameInput" class="block text-xs font-semibold text-emerald-800">添加新的常用起点</label>
+          <input id="originNameInput" type="text" placeholder="输入起点名称或地址（如：我家-萧山区 / 浙大紫金港）"
+            class="w-full bg-white border border-slate-200 focus:border-emerald-500 rounded-lg px-3 py-2 text-sm text-slate-700 outline-none transition" />
+          <div class="flex items-center gap-2">
+            <button id="btnAddOriginByText" type="button"
+              class="flex-1 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-sm transition">
+              按地址/当前位置保存
+            </button>
+            <button id="btnOriginPickOnMap" type="button"
+              class="px-3 py-2 rounded-lg bg-white border border-emerald-200 hover:bg-emerald-50 text-emerald-700 text-xs font-medium transition">
+              去地图点选
+            </button>
+          </div>
+          <p class="text-[11px] text-slate-500 leading-relaxed">
+            提示：输入包含区县名（如余杭区、萧山区、西湖区等）将自动匹配坐标；如需精准到小区，可先填名称再点「去地图点选」。
+          </p>
+        </div>
+
+        <!-- 已保存的常用起点列表 -->
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-xs font-bold text-slate-700">已保存的常用起点</h3>
+            <span class="text-[11px] text-slate-400">点击即可设为当前起点</span>
+          </div>
+          <div id="savedOriginsList" class="space-y-2">
+            <!-- 由 JS 动态渲染 -->
+          </div>
+        </div>
+      </div>
+
+      <div class="px-5 py-3 border-t border-slate-100 bg-slate-50/70 flex justify-end">
+        <button id="btnDoneOrigin" type="button"
+          class="px-5 py-2 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-semibold transition">
+          关闭
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 弹窗 4：删除确认弹窗 ==================== -->
+  <div id="deleteModal" class="hidden fixed inset-0 z-[1100] bg-slate-900/50 backdrop-blur-[2px] flex items-center justify-center p-4">
+    <div class="bg-white w-full max-w-sm rounded-2xl shadow-2xl p-5">
+      <h3 class="text-base font-bold text-slate-900">确认删除该条记录？</h3>
+      <p id="deleteModalDesc" class="text-sm text-slate-500 mt-2">删除后将从本地缓存中移除，无法恢复。</p>
+      <div class="mt-5 flex items-center gap-3">
+        <button id="btnCancelDelete" type="button"
+          class="flex-1 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium transition">
+          取消
+        </button>
+        <button id="btnConfirmDelete" type="button"
+          class="flex-1 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white text-sm font-semibold transition">
+          确认删除
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 弹窗 5：筛选核对与原文比对 ==================== -->
+  <div id="auditModal" class="hidden fixed inset-0 z-[1080] bg-slate-900/50 backdrop-blur-[2px] flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div class="bg-white w-full sm:max-w-3xl rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden">
+      <!-- 标题栏 -->
+      <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+        <div>
+          <h2 class="text-base font-bold text-slate-900">筛选核对与原文比对</h2>
+          <p class="text-xs text-slate-400 mt-0.5">对照「录入原文」与「系统提取字段」，逐条查看命中或被排除的具体原因</p>
+        </div>
+        <button id="btnCloseAudit" type="button" class="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center transition">✕</button>
+      </div>
+
+      <!-- 统计概览与当前筛选条件 -->
+      <div class="px-5 py-3 bg-slate-50 border-b border-slate-200/80 space-y-2.5 flex-shrink-0">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <!-- 状态切换标签 -->
+          <div class="inline-flex items-center bg-slate-200/70 p-1 rounded-xl gap-1">
+            <button type="button" data-audit-tab="all" class="audit-tab-btn px-3 py-1 rounded-lg text-xs font-semibold transition">
+              全部 (<span id="auditCountAll">0</span>)
+            </button>
+            <button type="button" data-audit-tab="matched" class="audit-tab-btn px-3 py-1 rounded-lg text-xs font-semibold transition">
+              ✅ 已筛出 (<span id="auditCountMatched">0</span>)
+            </button>
+            <button type="button" data-audit-tab="excluded" class="audit-tab-btn px-3 py-1 rounded-lg text-xs font-semibold transition">
+              ❌ 被排除 (<span id="auditCountExcluded">0</span>)
+            </button>
+          </div>
+          <div class="text-[11px] text-slate-500">
+            <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 mr-1"></span>绿色=命中条件
+            <span class="inline-block w-2 h-2 rounded-full bg-red-500 ml-2.5 mr-1"></span>红色=不符条件
+          </div>
+        </div>
+        <div id="auditActiveRules" class="text-xs text-slate-600 flex flex-wrap items-center gap-1.5">
+          <!-- 当前生效的筛选规则由 JS 渲染 -->
+        </div>
+      </div>
+
+      <!-- 逐条比对列表 -->
+      <div id="auditListContainer" class="p-4 sm:p-5 overflow-y-auto space-y-3.5 flex-1 bg-slate-100/60">
+        <!-- 由 JS 动态渲染 -->
+      </div>
+
+      <!-- 底部关闭栏 -->
+      <div class="px-5 py-3 border-t border-slate-100 bg-white flex items-center justify-between">
+        <span class="text-xs text-slate-400">如果发现系统提取字段有误，可删除该条后在「展开手动微调」中重新核对保存</span>
+        <button id="btnDoneAudit" type="button"
+          class="px-5 py-2 rounded-xl bg-brand-500 hover:bg-brand-600 text-white text-xs font-semibold shadow-sm transition flex-shrink-0">
+          关闭核对
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 弹窗 6：查看完整原文与一键复制 ==================== -->
+  <div id="rawTextModal" class="hidden fixed inset-0 z-[1090] bg-slate-900/50 backdrop-blur-[2px] flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div class="bg-white w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col max-h-[85vh] overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+        <div class="min-w-0 pr-2">
+          <h2 id="rawTextModalTitle" class="text-base font-bold text-slate-900 truncate">完整原始信息</h2>
+          <p id="rawTextModalMeta" class="text-xs text-slate-400 mt-0.5 truncate"></p>
+        </div>
+        <button id="btnCloseRawText" type="button" class="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center flex-shrink-0 transition">✕</button>
+      </div>
+
+      <div class="p-5 overflow-y-auto flex-1 bg-slate-50/60">
+        <div id="rawTextModalContent" class="bg-white border border-slate-200/80 rounded-xl p-4 text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words select-text"></div>
+      </div>
+
+      <div class="px-5 py-3.5 border-t border-slate-100 bg-white flex items-center gap-3">
+        <button id="btnDoneRawText" type="button"
+          class="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium transition">
+          关闭
+        </button>
+        <button id="btnCopyRawTextModal" type="button"
+          class="flex-1 py-2.5 rounded-xl bg-brand-500 hover:bg-brand-600 text-white text-sm font-semibold shadow-sm transition active:scale-95">
+          📋 一键复制原文
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 全局轻量级 Toast 提示 ==================== -->
+  <div id="toastBox" class="fixed top-5 left-1/2 -translate-x-1/2 z-[1200] pointer-events-none opacity-0 -translate-y-2 transition-all duration-300">
+    <div class="bg-slate-900/90 text-white px-4 py-2.5 rounded-xl shadow-lg text-sm font-medium flex items-center gap-2 whitespace-nowrap">
+      <span id="toastText"></span>
+    </div>
+  </div>
+
+  <!-- Leaflet JS (国内 BootCDN 源) -->
+  <script src="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+
+  <script>
+    (function () {
+      'use strict';
+
+      // =========================================================================
+      // 1. 常量配置、区县坐标库与初始示例数据
+      // =========================================================================
+      const STORAGE_KEY = 'WEB_INFO_RETRIEVAL_RECORDS_V1';
+      const CURRENT_ORIGIN_KEY = 'WEB_INFO_RETRIEVAL_CURRENT_ORIGIN_V1';
+      const SAVED_ORIGINS_KEY = 'WEB_INFO_RETRIEVAL_SAVED_ORIGINS_V1';
+      const DEFAULT_ORIGIN = { lat: 30.2741, lng: 120.1551, label: '杭州市中心' };
+      const GAODE_TILE_URL = 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}';
+
+      // 全国主要城市及常见区县/高校中心坐标库（用于批量导入与地址自动落点）
+      const REGION_COORDS = {
+        // 浙江（杭州核心区县及高校 + 省内主要城市）
+        '浙大紫金港': [30.3055, 120.0865],
+        '紫金港': [30.3055, 120.0865],
+        '玉泉': [30.2636, 120.1235],
+        '余杭区': [30.2741, 119.9784],
+        '余杭': [30.2741, 119.9784],
+        '钱塘区': [30.3121, 120.4862],
+        '河庄': [30.2956, 120.4910],
+        '萧山区': [30.1837, 120.2646],
+        '萧山': [30.1837, 120.2646],
+        '西湖区': [30.2594, 120.1302],
+        '西湖': [30.2594, 120.1302],
+        '滨江区': [30.2084, 120.2119],
+        '滨江': [30.2084, 120.2119],
+        '拱墅区': [30.3196, 120.1421],
+        '上城区': [30.2424, 120.1693],
+        '临平区': [30.4186, 120.2994],
+        '富阳区': [30.0487, 119.9605],
+        '临安区': [30.2336, 119.7248],
+        '桐庐': [29.7974, 119.6850],
+        '建德': [29.4748, 119.2812],
+        '淳安': [29.6088, 119.0419],
+        '杭州市': [30.2741, 120.1551],
+        '杭州': [30.2741, 120.1551],
+        '宁波': [29.8683, 121.5440],
+        '温州': [27.9938, 120.6994],
+        '嘉兴': [30.7468, 120.7555],
+        '湖州': [30.8943, 120.0868],
+        '绍兴': [30.0297, 120.5802],
+        '金华': [29.0790, 119.6474],
+        '台州': [28.6564, 121.4208],
+        '衢州': [28.9359, 118.8742],
+        '丽水': [28.4676, 119.9229],
+        '舟山': [29.9855, 122.2072],
+        // 上海主要区县
+        '徐汇区': [31.1885, 121.4365],
+        '浦东新区': [31.2215, 121.5444],
+        '浦东': [31.2215, 121.5444],
+        '静安区': [31.2290, 121.4474],
+        '黄浦区': [31.2317, 121.4844],
+        '长宁区': [31.2204, 121.4246],
+        '普陀区': [31.2495, 121.3970],
+        '虹口区': [31.2644, 121.5051],
+        '杨浦区': [31.2595, 121.5261],
+        '闵行区': [31.1128, 121.3817],
+        '宝山区': [31.4045, 121.4891],
+        '嘉定区': [31.3747, 121.2655],
+        '松江区': [31.0322, 121.2277],
+        '青浦区': [31.1498, 121.1242],
+        '奉贤区': [30.9179, 121.4741],
+        '上海': [31.2304, 121.4737],
+        // 北京主要区县
+        '海淀区': [39.9593, 116.2981],
+        '朝阳区': [39.9219, 116.4436],
+        '西城区': [39.9123, 116.3659],
+        '东城区': [39.9289, 116.4164],
+        '丰台区': [39.8585, 116.2863],
+        '通州区': [39.9099, 116.6564],
+        '昌平区': [40.2207, 116.2312],
+        '大兴区': [39.7269, 116.3414],
+        '顺义区': [40.1301, 116.6542],
+        '北京': [39.9042, 116.4074],
+        // 广东主要城市与区县
+        '天河区': [23.1246, 113.3612],
+        '越秀区': [23.1290, 113.2668],
+        '海珠区': [23.0838, 113.3174],
+        '番禺区': [22.9375, 113.3842],
+        '南山区': [22.5333, 113.9304],
+        '福田区': [22.5229, 114.0545],
+        '宝安区': [22.5533, 113.8831],
+        '龙岗区': [22.7198, 114.2478],
+        '龙华区': [22.6967, 114.0443],
+        '广州': [23.1291, 113.2644],
+        '深圳': [22.5431, 114.0579],
+        '东莞': [23.0207, 113.7518],
+        '佛山': [23.0215, 113.1214],
+        '珠海': [22.2707, 113.5767],
+        '惠州': [23.1118, 114.4162],
+        // 江苏主要城市
+        '南京': [32.0603, 118.7969],
+        '苏州': [31.2989, 120.5853],
+        '无锡': [31.4912, 120.3119],
+        '常州': [31.8112, 119.9741],
+        '南通': [31.9802, 120.8943],
+        '扬州': [32.3942, 119.4129],
+        '徐州': [34.2044, 117.2859],
+        // 全国其他省会及重点城市
+        '天津': [39.0842, 117.2010],
+        '重庆': [29.5630, 106.5516],
+        '成都': [30.5728, 104.0668],
+        '武汉': [30.5928, 114.3055],
+        '西安': [34.3416, 108.9398],
+        '长沙': [28.2282, 112.9388],
+        '郑州': [34.7466, 113.6253],
+        '合肥': [31.8206, 117.2272],
+        '福州': [26.0745, 119.2965],
+        '厦门': [24.4798, 118.0894],
+        '济南': [36.6512, 117.1201],
+        '青岛': [36.0671, 120.3826],
+        '沈阳': [41.8057, 123.4315],
+        '大连': [38.9140, 121.6147],
+        '长春': [43.8171, 125.3235],
+        '哈尔滨': [45.8038, 126.5350],
+        '石家庄': [38.0428, 114.5149],
+        '太原': [37.8706, 112.5489],
+        '南昌': [28.6820, 115.8579],
+        '昆明': [25.0389, 102.7183],
+        '贵阳': [26.6470, 106.6302],
+        '南宁': [22.8170, 108.3665],
+        '海口': [20.0440, 110.1999],
+        '三亚': [18.2528, 109.5120],
+        '兰州': [36.0611, 103.8343],
+        '呼和浩特': [40.8414, 111.7519],
+        '银川': [38.4872, 106.2309],
+        '西宁': [36.6171, 101.7782],
+        '乌鲁木齐': [43.8256, 87.6168],
+        '拉萨': [29.6500, 91.1000]
+      };
+
+      const OPTIONS = {
+        subjects: ['全部', '语文', '数学', '英语', '物理', '化学', '生物', '历史', '地理', '政治', '日语', '体育', '全科'],
+        grades: ['全部', '学前', '小学', '初中', '高中', '大学/成人'],
+        timeSlots: ['全部', '工作日白天', '工作日晚上', '周末白天', '周末晚上', '时间灵活/协商'],
+        feeRanges: [
+          { label: '不限', min: 0, max: Infinity },
+          { label: '100以下', min: 0, max: 99 },
+          { label: '100-150', min: 100, max: 150 },
+          { label: '150-300', min: 151, max: 300 },
+          { label: '300以上', min: 301, max: Infinity }
+        ],
+        genders: ['不限', '男', '女'],
+        teacherTypes: ['不限', '专职', '大学生'],
+        boolOptions: ['不限', '是', '否']
+      };
+
+      // 初始示例数据
+      const DEFAULT_RECORDS = [
+        {
+          id: 2026111402,
+          title: '余杭区 二年级英语 (2026111402)',
+          content: '一周2次，一次1到1.5小时；周中下午3点40；提供时薪：浙大120/h，其他一本学校70-80/h；要求女老师，口语好，经验丰富。',
+          rawText: '#可打折\n编号： 2026111402\n地址：余杭区湖山帝景湾南苑\n年级: 二年级\n科目：英语\n时长次数：一周2次，一次1到1.5小时\n学生情况：英语学习有2年，想结合三年级的教材，提前把三年级需要的单子以及知识点全部熟悉\n补习时间：周中下午3点40\n提供时薪：浙大120/h,其他一本学校70-80/h\n老师要求：女老师，口语好，经验丰富',
+          region: '杭州市余杭区',
+          address: '余杭区湖山帝景湾南苑',
+          latitude: 30.2741,
+          longitude: 119.9784,
+          subject: '英语',
+          grade: '小学',
+          timeSlot: '工作日白天',
+          fee: 120,
+          feeMin: 70,
+          feeMax: 120,
+          feeDisplay: '¥70-120/时',
+          gender: '女',
+          teacherType: '大学生',
+          isBilingual: false,
+          isInternational: false
+        },
+        {
+          id: 202652109,
+          title: '钱塘区 初二数学 (202652109)',
+          content: '一周一次，一次2小时；周日上午10点-12点；提供时薪：专职300/2h；要求能够长期带教，有初二浙教教学经验。',
+          rawText: '#复购\n编号： 202652109\n地址：钱塘区河庄街道江东锦绣\n年级: 初二\n科目：数学\n时长次数：一周一次，一次2小时\n学生情况：70-80分\n补习时间：周日上午10点-12点\n提供时薪：专职3002h\n老师要求：能够长期带教，寒暑假也有时间，数学成绩要好，有初二浙教教学经验，了解考试方向',
+          region: '杭州市钱塘区',
+          address: '钱塘区河庄街道江东锦绣',
+          latitude: 30.2956,
+          longitude: 120.4910,
+          subject: '数学',
+          grade: '初中',
+          timeSlot: '周末白天',
+          fee: 150,
+          feeMin: 150,
+          feeMax: 150,
+          feeDisplay: '¥150/时',
+          gender: '不限',
+          teacherType: '专职',
+          isBilingual: false,
+          isInternational: false
+        },
+        {
+          id: 2026111801,
+          title: '萧山区 高一物理双语辅导',
+          content: '工作日放学后 19:00-21:00 或时间协商；国际班双语物理，要求有耐心、逻辑清晰。',
+          rawText: '编号：2026111801\n地址：杭州市萧山区钱江世纪城\n年级：高一\n科目：物理\n补习时间：工作日放学后 19:00-21:00 或时间协商\n提供时薪：专职260/h\n老师要求：国际班双语物理，要求有耐心、逻辑清晰',
+          region: '杭州市萧山区',
+          address: '杭州市萧山区钱江世纪城',
+          latitude: 30.2310,
+          longitude: 120.2470,
+          subject: '物理',
+          grade: '高中',
+          timeSlot: '时间灵活/协商',
+          fee: 260,
+          feeMin: 260,
+          feeMax: 260,
+          feeDisplay: '¥260/时',
+          gender: '不限',
+          teacherType: '专职',
+          isBilingual: true,
+          isInternational: true
+        }
+      ];
+
+      // =========================================================================
+      // 2. 全局状态管理与本地缓存
+      // =========================================================================
+      const state = {
+        origin: loadCurrentOrigin(),
+        savedOrigins: loadSavedOrigins(),
+        rawRecords: loadRecords(),
+        filteredRecords: [],
+        searchKeyword: '',
+        selectedItemId: null,
+        pendingDeleteId: null,
+        viewingRawRecordId: null,
+        isPickingOriginOnMap: false,
+        pendingOriginNameForMap: '',
+        isManualEditExpanded: false,
+        auditTab: 'all',
+        filters: {
+          subject: '全部',
+          grade: '全部',
+          timeSlot: '全部',
+          includeFlexibleTime: true, // 筛选具体时段时，默认保留「时间灵活/协商」单子防漏单
+          feeIndex: 0,
+          gender: '不限',
+          teacherType: '不限',
+          bilingual: '不限',
+          international: '不限',
+          region: ''
+        },
+        draftFilters: null,
+        pickerCoord: null
+      };
+
+      // 规范化旧缓存中的时间段名称（兼容旧版 '时间灵活'）
+      function normalizeTimeSlot(slot) {
+        if (!slot || slot === '时间灵活' || slot === '时间协商') {
+          return '时间灵活/协商';
+        }
+        return slot;
+      }
+
+      function loadRecords() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              return parsed.map(item => ({
+                ...item,
+                timeSlot: normalizeTimeSlot(item.timeSlot)
+              }));
+            }
+          }
+        } catch (err) {
+          console.error('读取记录缓存失败:', err);
+        }
+        return DEFAULT_RECORDS.map(item => ({ ...item }));
+      }
+
+      function saveRecords() {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state.rawRecords));
+        } catch (err) {
+          console.error('保存记录缓存失败:', err);
+          showToast('本地存储空间不足，保存失败');
+        }
+      }
+
+      function loadCurrentOrigin() {
+        try {
+          const raw = localStorage.getItem(CURRENT_ORIGIN_KEY);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed.lat === 'number' && typeof parsed.lng === 'number') {
+              return parsed;
+            }
+          }
+        } catch (err) {
+          console.error('读取当前起点失败:', err);
+        }
+        return { ...DEFAULT_ORIGIN };
+      }
+
+      function saveCurrentOrigin() {
+        try {
+          localStorage.setItem(CURRENT_ORIGIN_KEY, JSON.stringify(state.origin));
+        } catch (err) {
+          console.error('保存当前起点失败:', err);
+        }
+      }
+
+      function loadSavedOrigins() {
+        try {
+          const raw = localStorage.getItem(SAVED_ORIGINS_KEY);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+          }
+        } catch (err) {
+          console.error('读取常用起点失败:', err);
+        }
+        return [
+          { id: 'origin_hz', label: '杭州市中心', lat: 30.2741, lng: 120.1551 },
+          { id: 'origin_zju', label: '浙大紫金港', lat: 30.3055, lng: 120.0865 }
+        ];
+      }
+
+      function saveSavedOrigins() {
+        try {
+          localStorage.setItem(SAVED_ORIGINS_KEY, JSON.stringify(state.savedOrigins));
+        } catch (err) {
+          console.error('保存常用起点失败:', err);
+        }
+      }
+
+      // =========================================================================
+      // 3. 通用工具函数（安全转义、Toast、距离与6种交通时长）
+      // =========================================================================
+      function escapeHtml(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      let toastTimer = null;
+      function showToast(msg) {
+        const box = document.getElementById('toastBox');
+        const textEl = document.getElementById('toastText');
+        if (!box || !textEl) return;
+        textEl.textContent = msg;
+        box.classList.remove('opacity-0', '-translate-y-2');
+        box.classList.add('opacity-100', 'translate-y-0');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => {
+          box.classList.remove('opacity-100', 'translate-y-0');
+          box.classList.add('opacity-0', '-translate-y-2');
+        }, 2600);
+      }
+
+      // 兼容 iFrame 与各类浏览器的剪贴板复制函数
+      function copyTextToClipboard(text) {
+        try {
+          const textarea = document.createElement('textarea');
+          textarea.value = text;
+          textarea.setAttribute('readonly', '');
+          textarea.style.position = 'fixed';
+          textarea.style.top = '-9999px';
+          textarea.style.left = '-9999px';
+          document.body.appendChild(textarea);
+          textarea.select();
+          textarea.setSelectionRange(0, textarea.value.length);
+          const ok = document.execCommand('copy');
+          document.body.removeChild(textarea);
+          if (ok) {
+            showToast('已复制完整原文到剪贴板');
+          } else {
+            showToast('复制失败，请点开原文手动选中复制');
+          }
+        } catch (err) {
+          console.error('复制失败:', err);
+          showToast('复制失败，请点开原文手动选中复制');
+        }
+      }
+
+      // Haversine 球面距离公式（单位：km）
+      function calculateHaversineKm(lat1, lng1, lat2, lng2) {
+        const toRad = d => (d * Math.PI) / 180;
+        const R = 6371;
+        const dLat = toRad(lat2 - lat1);
+        const dLng = toRad(lng2 - lng1);
+        const a = Math.sin(dLat / 2) ** 2 +
+                  Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      }
+
+      // 估算 6 种交通方式耗时（步行、骑行、电动车、公交地铁、汽车、高铁）
+      function estimateTransportDurations(roadKm) {
+        const formatHours = (hours) => {
+          const totalMin = Math.round(hours * 60);
+          if (totalMin < 1) return '1分';
+          if (totalMin < 60) return `${totalMin}分`;
+          const h = Math.floor(totalMin / 60);
+          const m = totalMin % 60;
+          return m > 0 ? `${h}时${m}分` : `${h}小时`;
+        };
+
+        return {
+          walk: roadKm > 40 ? '过远' : formatHours(roadKm / 4.5),
+          bike: roadKm > 80 ? '过远' : formatHours(roadKm / 14),
+          ebike: roadKm > 70 ? '超续航' : formatHours(roadKm / 25),
+          transit: roadKm < 0.8 ? '步行更近' : (roadKm > 120 ? '跨城' : formatHours(roadKm / 20 + 0.2)),
+          car: formatHours(roadKm / (roadKm > 30 ? 65 : 30)),
+          hsr: roadKm < 30 ? '不适用' : formatHours(roadKm / 250 + 0.65)
+        };
+      }
+
+      // 根据文本匹配内置坐标库
+      function matchCoordsByText(text) {
+        if (!text) return null;
+        // 优先匹配更长的地名关键词（如“浙大紫金港”优先于“杭州”）
+        const keys = Object.keys(REGION_COORDS).sort((a, b) => b.length - a.length);
+        for (const key of keys) {
+          if (text.includes(key)) {
+            const [lat, lng] = REGION_COORDS[key];
+            return { lat, lng, matchedKey: key };
+          }
+        }
+        return null;
+      }
+
+      // =========================================================================
+      // 3.5 内置杭州地铁核心线网与最短耗时换乘规划引擎
+      // =========================================================================
+      const HZ_METRO_STATIONS = {
+        // 1号线核心站点
+        '湘湖': [30.1455, 120.2335], '滨康路': [30.1815, 120.2238], '西兴': [30.1930, 120.2190],
+        '江陵路': [30.2108, 120.2173], '近江': [30.2323, 120.1912], '城站': [30.2442, 120.1818],
+        '定安路': [30.2471, 120.1687], '龙翔桥': [30.2553, 120.1636], '凤起路': [30.2646, 120.1634],
+        '武林广场': [30.2715, 120.1637], '西湖文化广场': [30.2789, 120.1642], '打铁关': [30.2855, 120.1755],
+        '闸弄口': [30.2889, 120.1972], '火车东站': [30.2913, 120.2130], '彭埠': [30.2949, 120.2248],
+        '客运中心': [30.3111, 120.2662], '下沙西': [30.3106, 120.3049], '金沙湖': [30.3114, 120.3204],
+        '文泽路': [30.3119, 120.3472], '文海南路': [30.3121, 120.3712], '下沙江滨': [30.2974, 120.3860],
+        '萧山国际机场': [30.2361, 120.4352],
+        // 2号线核心站点
+        '良渚': [30.3688, 120.0695], '金家渡': [30.3360, 120.0890], '三墩': [30.3168, 120.0985],
+        '三坝': [30.2995, 120.1045], '文新': [30.2865, 120.1052], '丰潭路': [30.2782, 120.1145],
+        '古翠路': [30.2782, 120.1255], '学院路': [30.2782, 120.1365], '沈塘桥': [30.2775, 120.1518],
+        '武林门': [30.2709, 120.1558], '建国北路': [30.2646, 120.1818], '庆春广场': [30.2591, 120.2038],
+        '钱江路': [30.2528, 120.2066], '钱江世纪城': [30.2314, 120.2442], '振宁路': [30.2141, 120.2625],
+        '建设三路': [30.2026, 120.2651], '人民广场': [30.1856, 120.2646], '朝阳': [30.1495, 120.2646],
+        // 3号线核心站点
+        '火车西站': [30.3036, 119.9722], '绿汀路': [30.2775, 119.9765], '文一西路': [30.2825, 119.9975],
+        '高教路': [30.2682, 120.0255], '联胜路': [30.2645, 120.0445], '西溪湿地南': [30.2535, 120.0685],
+        '留下': [30.2442, 120.0485], '古荡': [30.2695, 120.1245], '黄龙体育中心': [30.2682, 120.1362],
+        '善贤': [30.3228, 120.1636], '新天地街': [30.3258, 120.1848], '丁桥': [30.3422, 120.2332],
+        '星桥': [30.3865, 120.2595],
+        // 5号线核心站点
+        '南湖东': [30.2712, 119.9465], '金星': [30.2765, 119.9615], '创景路': [30.2825, 120.0022],
+        '良睦路': [30.2862, 120.0142], '杭师大仓前': [30.2895, 120.0252], '五常': [30.2925, 120.0462],
+        '蒋村': [30.2982, 120.0725], '浙大紫金港': [30.3018, 120.0885], '萍水街': [30.3045, 120.1145],
+        '和睦': [30.3135, 120.1225], '拱宸桥东': [30.3185, 120.1455], '江城路': [30.2368, 120.1762],
+        '南星桥': [30.2238, 120.1755], '长河': [30.1945, 120.1955], '火车南站': [30.1735, 120.2925],
+        '姑娘桥': [30.1585, 120.3345],
+        // 6号线核心站点
+        '桂花西路': [30.0512, 119.9565], '美院象山': [30.1525, 120.0835], '奥体中心': [30.2305, 120.2315],
+        '三堡': [30.2652, 120.2195],
+        // 7号线核心站点
+        '吴山广场': [30.2412, 120.1682], '观音塘': [30.2435, 120.1972], '市民中心': [30.2465, 120.2115],
+        '永盛路': [30.2392, 120.4712], '义蓬': [30.2665, 120.5112], '青六中路': [30.3085, 120.5285],
+        // 8号线核心站点（连接下沙与钱塘河庄）
+        '桥头堡': [30.3055, 120.4615], '河庄路': [30.3025, 120.4895], '新湾路': [30.2895, 120.5625],
+        // 9号线核心站点（连接钱江新城与临平）
+        '御道': [30.2785, 120.2365], '乔司': [30.3485, 120.2795], '临平南高铁站': [30.3915, 120.2965],
+        '临平': [30.4185, 120.2995],
+        // 19号线机场快线核心站点
+        '海创园': [30.2815, 120.0295], '西溪湿地北': [30.2755, 120.0825], '文三路': [30.2775, 120.1385]
+      };
+
+      const HZ_METRO_LINES = [
+        { id: 'L1', name: '1号线', color: '#E60012', stations: ['湘湖', '滨康路', '西兴', '江陵路', '近江', '城站', '定安路', '龙翔桥', '凤起路', '武林广场', '西湖文化广场', '打铁关', '闸弄口', '火车东站', '彭埠', '客运中心', '下沙西', '金沙湖', '文泽路', '文海南路', '下沙江滨', '萧山国际机场'] },
+        { id: 'L2', name: '2号线', color: '#F39800', stations: ['良渚', '金家渡', '三墩', '三坝', '文新', '丰潭路', '古翠路', '学院路', '沈塘桥', '武林门', '凤起路', '建国北路', '庆春广场', '钱江路', '钱江世纪城', '振宁路', '建设三路', '人民广场', '朝阳'] },
+        { id: 'L3', name: '3号线', color: '#D4A000', stations: ['火车西站', '绿汀路', '文一西路', '高教路', '联胜路', '西溪湿地南', '留下', '古荡', '黄龙体育中心', '武林门', '武林广场', '西湖文化广场', '善贤', '新天地街', '丁桥', '星桥'] },
+        { id: 'L5', name: '5号线', color: '#00A09D', stations: ['南湖东', '金星', '绿汀路', '创景路', '良睦路', '杭师大仓前', '五常', '蒋村', '浙大紫金港', '三坝', '萍水街', '和睦', '拱宸桥东', '善贤', '打铁关', '建国北路', '城站', '江城路', '南星桥', '长河', '滨康路', '人民广场', '火车南站', '姑娘桥'] },
+        { id: 'L6', name: '6号线', color: '#0072CE', stations: ['桂花西路', '美院象山', '长河', '江陵路', '奥体中心', '钱江世纪城', '三堡', '火车东站'] },
+        { id: 'L7', name: '7号线', color: '#6F2C91', stations: ['吴山广场', '江城路', '观音塘', '市民中心', '奥体中心', '建设三路', '萧山国际机场', '永盛路', '义蓬', '青六中路'] },
+        { id: 'L8', name: '8号线', color: '#A6192E', stations: ['文海南路', '桥头堡', '河庄路', '青六中路', '新湾路'] },
+        { id: 'L9', name: '9号线', color: '#B55D1C', stations: ['观音塘', '钱江路', '三堡', '御道', '客运中心', '乔司', '临平南高铁站', '临平'] },
+        { id: 'L19', name: '19号线(快线)', color: '#0098D8', stations: ['火车西站', '创景路', '海创园', '西溪湿地北', '文三路', '沈塘桥', '西湖文化广场', '火车东站', '御道', '萧山国际机场', '永盛路'] }
+      ];
+
+      // 构建地铁换乘图（邻接表：节点格式为 "站名|线路ID"）
+      const METRO_GRAPH = (() => {
+        const adj = {};
+        const stationToLines = {};
+        const lineMap = {};
+
+        const addEdge = (u, v, cost, type, lineId) => {
+          if (!adj[u]) adj[u] = [];
+          adj[u].push({ to: v, cost, type, lineId });
+        };
+
+        HZ_METRO_LINES.forEach(line => {
+          lineMap[line.id] = line;
+          const speedKmh = line.id === 'L19' ? 68 : 38;
+          for (let i = 0; i < line.stations.length; i++) {
+            const st = line.stations[i];
+            if (!stationToLines[st]) stationToLines[st] = [];
+            stationToLines[st].push(line.id);
+
+            if (i < line.stations.length - 1) {
+              const nextSt = line.stations[i + 1];
+              const c1 = HZ_METRO_STATIONS[st];
+              const c2 = HZ_METRO_STATIONS[nextSt];
+              const distKm = (c1 && c2) ? calculateHaversineKm(c1[0], c1[1], c2[0], c2[1]) : 1.8;
+              // 单站运行时间 = 区间行车时间 + 停站上下客 0.6 分钟
+              const rideMin = Math.max(1.8, (distKm / speedKmh) * 60 + 0.6);
+              const u = `${st}|${line.id}`;
+              const v = `${nextSt}|${line.id}`;
+              addEdge(u, v, rideMin, 'ride', line.id);
+              addEdge(v, u, rideMin, 'ride', line.id);
+            }
+          }
+        });
+
+        // 添加同站换乘边（换乘步行 + 候车约 6 分钟）
+        Object.keys(stationToLines).forEach(st => {
+          const lines = stationToLines[st];
+          if (lines.length > 1) {
+            for (let i = 0; i < lines.length; i++) {
+              for (let j = 0; j < lines.length; j++) {
+                if (i !== j) {
+                  addEdge(`${st}|${lines[i]}`, `${st}|${lines[j]}`, 6.0, 'transfer', lines[j]);
+                }
+              }
+            }
+          }
+        });
+
+        return { adj, stationToLines, lineMap };
+      })();
+
+      // 寻找距离某坐标最近的最多 3 个地铁站（在 maxRadiusKm 范围内）
+      function findNearestMetroStations(lat, lng, maxRadiusKm = 6.5, limit = 3) {
+        const list = [];
+        Object.entries(HZ_METRO_STATIONS).forEach(([name, coords]) => {
+          const straightKm = calculateHaversineKm(lat, lng, coords[0], coords[1]);
+          const walkKm = straightKm * 1.2;
+          if (walkKm <= maxRadiusKm) {
+            list.push({
+              name,
+              lat: coords[0],
+              lng: coords[1],
+              walkKm,
+              walkMin: Math.max(2, Math.round((walkKm / 4.5) * 60))
+            });
+          }
+        });
+        list.sort((a, b) => a.walkKm - b.walkKm);
+        return list.slice(0, limit);
+      }
+
+      // 规划地铁直达或换乘路线
+      function planMetroRoute(originLat, originLng, targetLat, targetLng) {
+        const straightKm = calculateHaversineKm(originLat, originLng, targetLat, targetLng);
+        if (straightKm < 0.9) {
+          return { available: false, reason: '起终点距离很近（小于1公里），建议直接步行或骑行' };
+        }
+
+        const startCandidates = findNearestMetroStations(originLat, originLng, 7.5, 3);
+        const endCandidates = findNearestMetroStations(targetLat, targetLng, 7.5, 3);
+
+        if (startCandidates.length === 0 || endCandidates.length === 0) {
+          return { available: false, reason: '起点或终点暂超出内置杭州地铁覆盖范围，可点击下方查看高德实时公交换乘' };
+        }
+
+        // Dijkstra 最短耗时搜索（START -> END）
+        const dist = { START: 0 };
+        const prev = {};
+        const visited = new Set();
+        const pq = [{ node: 'START', cost: 0 }];
+
+        // 终点候选中转映射
+        const endStationMap = {};
+        endCandidates.forEach(ec => { endStationMap[ec.name] = ec; });
+
+        // 起点连接到候选进站口（含 3 分钟安检候车）
+        const startEdges = [];
+        startCandidates.forEach(sc => {
+          const lines = METRO_GRAPH.stationToLines[sc.name] || [];
+          lines.forEach(lineId => {
+            startEdges.push({ to: `${sc.name}|${lineId}`, cost: sc.walkMin + 3, meta: sc });
+          });
+        });
+
+        while (pq.length > 0) {
+          pq.sort((a, b) => a.cost - b.cost);
+          const { node, cost } = pq.shift();
+          if (visited.has(node)) continue;
+          visited.add(node);
+          if (node === 'END') break;
+
+          let neighbors = [];
+          if (node === 'START') {
+            neighbors = startEdges;
+          } else {
+            neighbors = (METRO_GRAPH.adj[node] || []).slice();
+            const [stName] = node.split('|');
+            if (endStationMap[stName]) {
+              neighbors.push({ to: 'END', cost: endStationMap[stName].walkMin + 2, type: 'exit', meta: endStationMap[stName] });
+            }
+          }
+
+          for (const edge of neighbors) {
+            const nextCost = cost + edge.cost;
+            if (dist[edge.to] === undefined || nextCost < dist[edge.to]) {
+              dist[edge.to] = nextCost;
+              prev[edge.to] = { from: node, edge };
+              pq.push({ node: edge.to, cost: nextCost });
+            }
+          }
+        }
+
+        if (dist.END === undefined) {
+          return { available: false, reason: '暂未匹配到地铁直达/换乘路线，请使用高德实时导航' };
+        }
+
+        // 回溯路径
+        const rawSteps = [];
+        let cur = 'END';
+        while (cur && cur !== 'START') {
+          const p = prev[cur];
+          if (!p) break;
+          rawSteps.unshift({ from: p.from, to: cur, edge: p.edge });
+          cur = p.from;
+        }
+
+        const startMeta = rawSteps[0].edge.meta;
+        const endMeta = rawSteps[rawSteps.length - 1].edge.meta;
+
+        // 如果进站与出站是同一站，说明不需要坐地铁
+        if (startMeta.name === endMeta.name) {
+          return { available: false, reason: `起终点均在「${startMeta.name}」附近，直接步行或骑行更快捷` };
+        }
+
+        // 将连续乘坐同一线路的区间合并为乘车段（legs）
+        const legs = [];
+        let currentLeg = null;
+
+        for (let i = 1; i < rawSteps.length - 1; i++) {
+          const step = rawSteps[i];
+          if (step.edge.type === 'ride') {
+            const [fromSt, lineId] = step.from.split('|');
+            const [toSt] = step.to.split('|');
+            if (!currentLeg || currentLeg.lineId !== lineId) {
+              const lineInfo = METRO_GRAPH.lineMap[lineId];
+              currentLeg = {
+                lineId,
+                lineName: lineInfo.name,
+                lineColor: lineInfo.color,
+                fromStation: fromSt,
+                toStation: toSt,
+                stations: [fromSt, toSt],
+                rideMin: step.edge.cost
+              };
+              legs.push(currentLeg);
+            } else {
+              currentLeg.toStation = toSt;
+              currentLeg.stations.push(toSt);
+              currentLeg.rideMin += step.edge.cost;
+            }
+          } else if (step.edge.type === 'transfer') {
+            currentLeg = null;
+          }
+        }
+
+        if (legs.length === 0) {
+          return { available: false, reason: '距离较近，无需乘坐地铁' };
+        }
+
+        // 补充每段乘车的开往方向（根据站点在线路中的顺序判断终点站）
+        legs.forEach(leg => {
+          const lineStations = METRO_GRAPH.lineMap[leg.lineId].stations;
+          const idxFrom = lineStations.indexOf(leg.fromStation);
+          const idxTo = lineStations.indexOf(leg.toStation);
+          leg.direction = idxTo > idxFrom ? lineStations[lineStations.length - 1] : lineStations[0];
+          leg.stopCount = leg.stations.length - 1;
+          leg.rideMin = Math.max(2, Math.round(leg.rideMin));
+        });
+
+        const totalMin = Math.round(dist.END);
+        const transfers = Math.max(0, legs.length - 1);
+        const totalStops = legs.reduce((sum, l) => sum + l.stopCount, 0);
+        const totalWalkMeters = Math.round((startMeta.walkKm + endMeta.walkKm) * 1000);
+
+        const formatMin = (m) => {
+          if (m < 60) return `${m}分`;
+          const h = Math.floor(m / 60);
+          const rem = m % 60;
+          return rem > 0 ? `${h}时${rem}分` : `${h}小时`;
+        };
+
+        return {
+          available: true,
+          totalMin,
+          totalTimeText: formatMin(totalMin),
+          transfers,
+          totalStops,
+          totalWalkMeters,
+          startWalk: startMeta,
+          endWalk: endMeta,
+          legs,
+          summaryLineNames: legs.map(l => l.lineName).join(' → ')
+        };
+      }
+
+      // =========================================================================
+      // 4. 优化版时间识别 + 文本智能解析引擎
+      // =========================================================================
+      /**
+       * 智能识别时间段：
+       * 1. 优先识别“时间协商 / 灵活 / 待定 / 双方沟通”等表述；
+       * 2. 精准识别晚上：除“晚/傍晚”外，将 18:00-23:59 及“放学后”归为晚上；
+       * 3. 若同时包含工作日与周末，归为「时间灵活/协商」。
+       */
+      function detectTimeSlot(fullText) {
+        // 尝试优先抽取专门写时间的行（如“补习时间：...”、“上课时间：...”）
+        const timeLineMatch = fullText.match(/(?:补习时间|上课时间|辅导时间|时间安排|时间)[：:]\s*([^\n]+)/);
+        const target = timeLineMatch ? timeLineMatch[1].trim() : fullText;
+
+        const hasFlexibleWord = /时间协商|协商|灵活|待定|均可|双方沟通|都可以|随时|可商量|商议|面议/.test(target);
+        const hasWeekend = /周末|周六|周日|星期六|星期日|星期天|双休/.test(target);
+        const hasWeekday = /工作日|周中|平时|周[一二三四五]|星期[一二三四五]|放学后|晚自习/.test(target);
+
+        // 晚间判断：含晚/傍晚/放学后，或出现 18:00 ~ 23:59 / 18点 ~ 23点
+        const hasEveningWord = /晚上|晚间|傍晚|夜间|放学后|晚自习|晚\s*\d/.test(target);
+        const hasEveningHour = /(?:^|[^\d])(1[89]|2[0-3])\s*(?:点|:|：|时)/.test(target);
+        const isEvening = hasEveningWord || hasEveningHour;
+
+        // 是否包含明确的具体时钟或上下午（如“上午10点”、“下午3点40”、“19:00”）
+        const hasConcreteClock = /上午|下午|中午|早上|早晨|白天|\d{1,2}\s*(?:点|:|：|时)/.test(target) || isEvening;
+
+        // 1. 明确写了协商/灵活，且没有同时限定“具体周几 + 具体上下午/几点” -> 归为「时间灵活/协商」
+        if (hasFlexibleWord && !((hasWeekend || hasWeekday) && hasConcreteClock)) {
+          return '时间灵活/协商';
+        }
+
+        // 2. 同时涵盖工作日和周末 -> 归为「时间灵活/协商」
+        if (hasWeekend && hasWeekday) {
+          return '时间灵活/协商';
+        }
+
+        // 3. 明确为周末
+        if (hasWeekend) {
+          return isEvening ? '周末晚上' : '周末白天';
+        }
+
+        // 4. 明确为工作日/周中/放学后
+        if (hasWeekday) {
+          return isEvening ? '工作日晚上' : '工作日白天';
+        }
+
+        // 5. 未写周几，但写了明确的晚间特征（如“每晚19:00”）
+        if (isEvening && !hasFlexibleWord) {
+          return '工作日晚上';
+        }
+
+        // 6. 其余未明确标注的情况默认归为「时间灵活/协商」
+        return '时间灵活/协商';
+      }
+
+      // 解析单条订单文本
+      function parseSingleOrderText(blockText, fallbackIndex = 0) {
+        const text = blockText.trim();
+
+        // 1. 编号
+        const codeMatch = text.match(/编号[：:]\s*([A-Za-z0-9_-]+)/);
+        const orderCode = codeMatch ? codeMatch[1].trim() : '';
+
+        // 2. 地址与所属地区
+        const addrMatch = text.match(/(?:地址|地点|位置)[：:]\s*([^\n]+)/);
+        let address = addrMatch ? addrMatch[1].trim() : '';
+        let region = '';
+
+        const regionRegex = /([\u4e00-\u9fa5]{2,4}省)?([\u4e00-\u9fa5]{2,4}市)?([\u4e00-\u9fa5]{2,5}(?:区|县|新区|市))/;
+        const regMatch = (address || text).match(regionRegex);
+        if (regMatch) {
+          region = regMatch[0];
+        } else {
+          const coordMatch = matchCoordsByText(address || text);
+          if (coordMatch) region = coordMatch.matchedKey;
+        }
+        if (!address) address = region || '未填写详细地址';
+
+        // 3. 学科科目
+        const subjectList = OPTIONS.subjects.filter(s => s !== '全部');
+        let subject = '全科';
+        const subjLine = text.match(/(?:科目|学科)[：:]\s*([^\n]+)/);
+        const subjSearchArea = subjLine ? subjLine[1] : text;
+        for (const s of subjectList) {
+          if (subjSearchArea.includes(s)) {
+            subject = s;
+            break;
+          }
+        }
+
+        // 4. 年级段与具体年级文本
+        const gradeLine = text.match(/年级[：:]\s*([^\n]+)/);
+        const gradeArea = gradeLine ? gradeLine[1].trim() : text;
+        let grade = '小学';
+        let gradeDetail = '';
+        if (/学前|幼儿园|大班|中班|小班/.test(gradeArea)) {
+          grade = '学前';
+          gradeDetail = '学前';
+        } else if (/大学|成人|考研|雅思|托福|四六级/.test(gradeArea)) {
+          grade = '大学/成人';
+          gradeDetail = '大学/成人';
+        } else if (/高中|高[一二三123]|1[012]年级/.test(gradeArea)) {
+          grade = '高中';
+          const m = gradeArea.match(/高[一二三123]|1[012]年级/);
+          gradeDetail = m ? m[0] : '高中';
+        } else if (/初中|初[一二三123]|[七八九789]年级/.test(gradeArea)) {
+          grade = '初中';
+          const m = gradeArea.match(/初[一二三123]|[七八九789]年级/);
+          gradeDetail = m ? m[0] : '初中';
+        } else if (/小学|[一二三四五六1-6]年级/.test(gradeArea)) {
+          grade = '小学';
+          const m = gradeArea.match(/[一二三四五六1-6]年级/);
+          gradeDetail = m ? m[0] : '小学';
+        }
+
+        // 5. 时间段（使用升级版识别逻辑）
+        const timeSlot = detectTimeSlot(text);
+
+        // 6. 薪资解析（支持 120/h、70-80/h、100左右、专职3002h 自动折算为 150/时）
+        const feeLineMatch = text.match(/(?:提供时薪|时薪|薪资|费用|报酬|课酬)[：:]\s*([^\n]+)/);
+        const feeText = feeLineMatch ? feeLineMatch[1] : text;
+        const extractedFees = [];
+
+        // 特殊格式：如 "3002h" 或 "300/2h" 或 "300元2小时"
+        const packRegex = /(\d{2,4})\s*(?:元|块)?\s*\/?\s*([2-5])\s*(?:h|H|小时|时)/g;
+        let packMatch;
+        while ((packMatch = packRegex.exec(feeText)) !== null) {
+          const total = Number(packMatch[1]);
+          const hours = Number(packMatch[2]);
+          if (total >= 80 && hours >= 2) {
+            extractedFees.push(Math.round(total / hours));
+          }
+        }
+
+        // 区间格式：如 "70-80/h" 或 "150-200元"
+        const rangeRegex = /(\d{2,4})\s*[-~至到]\s*(\d{2,4})\s*(?:元|块|\/h|\/H|\/时|\/小时|左右)?/g;
+        let rangeMatch;
+        while ((rangeMatch = rangeRegex.exec(feeText)) !== null) {
+          const v1 = Number(rangeMatch[1]);
+          const v2 = Number(rangeMatch[2]);
+          if (v1 >= 30 && v1 <= 2000 && v2 >= 30 && v2 <= 2000) {
+            extractedFees.push(v1, v2);
+          }
+        }
+
+        // 单值格式：如 "120/h"、"100左右"、"260元"
+        const singleRegex = /(\d{2,4})\s*(?:元|块|\/h|\/H|\/时|\/小时|每小时|左右)/g;
+        let singleMatch;
+        while ((singleMatch = singleRegex.exec(feeText)) !== null) {
+          const v = Number(singleMatch[1]);
+          if (v >= 30 && v <= 2000) extractedFees.push(v);
+        }
+
+        let feeMin = 0;
+        let feeMax = 0;
+        let fee = 0;
+        let feeDisplay = '面议';
+        if (extractedFees.length > 0) {
+          feeMin = Math.min(...extractedFees);
+          feeMax = Math.max(...extractedFees);
+          fee = feeMax;
+          feeDisplay = feeMin === feeMax ? `¥${feeMax}/时` : `¥${feeMin}-${feeMax}/时`;
+        }
+
+        // 7. 性别要求（注意避开“学生性别：男孩”，优先看“老师要求/要求”）
+        const reqLineMatch = text.match(/(?:老师要求|教师要求|要求)[：:]\s*([^\n]+)/);
+        const reqArea = reqLineMatch ? reqLineMatch[1] : text;
+        let gender = '不限';
+        if (/女老师|限女|仅限女|要求女|女生/.test(reqArea)) gender = '女';
+        else if (/男老师|限男|仅限男|要求男|男生/.test(reqArea)) gender = '男';
+
+        // 8. 师资身份（专职 / 大学生）
+        let teacherType = '不限';
+        if (/专职|全职|在职|机构老师/.test(text)) {
+          teacherType = '专职';
+        } else if (/大学生|在校生|本科|研究生|浙大|一本|985|211|重点大学/.test(text)) {
+          teacherType = '大学生';
+        }
+
+        // 9. 双语与国际标识
+        const isBilingual = /双语|全英|英文授课|口语好/.test(text);
+        const isInternational = /国际|IB|AP|A-Level|IGCSE|美高|英高/i.test(text);
+
+        // 10. 自动匹配坐标（带微小抖动避免同区县多个点完全重叠）
+        const coordHit = matchCoordsByText(address) || matchCoordsByText(region) || matchCoordsByText(text);
+        const jitterLat = ((fallbackIndex % 5) - 2) * 0.003;
+        const jitterLng = ((Math.floor(fallbackIndex / 5) % 5) - 2) * 0.003;
+        const latitude = coordHit ? coordHit.lat + jitterLat : state.origin.lat + jitterLat;
+        const longitude = coordHit ? coordHit.lng + jitterLng : state.origin.lng + jitterLng;
+
+        // 11. 自动拼接清晰标题与完整原文
+        const shortReg = region ? region.replace(/^[\u4e00-\u9fa5]{2,3}市/, '') : '';
+        const titleCore = `${gradeDetail || grade}${subject}`;
+        const title = [shortReg, titleCore, orderCode ? `(${orderCode})` : ''].filter(Boolean).join(' ');
+
+        return {
+          id: Date.now() + fallbackIndex,
+          title: title || `${grade}${subject}信息`,
+          content: text.replace(/\n+/g, '；'),
+          rawText: text,
+          region: region || '未标注地区',
+          address,
+          latitude,
+          longitude,
+          subject,
+          grade,
+          timeSlot,
+          fee,
+          feeMin,
+          feeMax,
+          feeDisplay,
+          gender,
+          teacherType,
+          isBilingual,
+          isInternational
+        };
+      }
+
+      // 将粘贴的多条文本拆分为独立订单块（完整保留每条订单的 #标签、编号 与原始换行）
+      function splitOrderBlocks(rawText) {
+        const normalized = rawText.replace(/\r\n/g, '\n').trim();
+        if (!normalized) return [];
+
+        const lines = normalized.split('\n');
+        const blocks = [];
+        let current = [];
+
+        const isTagHeader = (line) => /^#[\u4e00-\u9fa5A-Za-z0-9_]+/.test(line.trim());
+        const isCodeHeader = (line) => /^编号\s*[：:]/.test(line.trim());
+
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          const trimmed = line.trim();
+
+          if (isTagHeader(trimmed)) {
+            if (current.some(l => l.trim().length > 0)) {
+              blocks.push(current.join('\n').trim());
+              current = [];
+            }
+            current.push(line);
+          } else if (isCodeHeader(trimmed)) {
+            // 仅当当前块里已经包含除 #标签/空行 以外的正文内容时才开启新块，避免把 #可打折 与 编号： 拆开
+            const hasNonHeaderContent = current.some(l => {
+              const t = l.trim();
+              return t.length > 0 && !isTagHeader(t);
+            });
+            if (hasNonHeaderContent) {
+              blocks.push(current.join('\n').trim());
+              current = [];
+            }
+            current.push(line);
+          } else {
+            current.push(line);
+          }
+        }
+
+        if (current.some(l => l.trim().length > 0)) {
+          blocks.push(current.join('\n').trim());
+        }
+
+        return blocks.filter(b => b.length > 0);
+      }
+
+      // =========================================================================
+      // 5. 地图初始化与路线折线联动
+      // =========================================================================
+      let mainMap = null;
+      let originMarker = null;
+      let targetMarkersLayer = null;
+      let routePolyline = null;
+      let metroRouteLayer = null;
+      let pickerMap = null;
+      let pickerMarker = null;
+
+      function initMainMap() {
+        mainMap = L.map('mainMap', {
+          center: [state.origin.lat, state.origin.lng],
+          zoom: 11,
+          zoomControl: false
+        });
+
+        L.control.zoom({ position: 'bottomright' }).addTo(mainMap);
+
+        L.tileLayer(GAODE_TILE_URL, {
+          subdomains: ['1', '2', '3', '4'],
+          maxZoom: 18,
+          attribution: '&copy; 高德地图'
+        }).addTo(mainMap);
+
+        targetMarkersLayer = L.layerGroup().addTo(mainMap);
+        metroRouteLayer = L.layerGroup().addTo(mainMap);
+
+        // 地图点击监听：用于“点图设起点”模式
+        mainMap.on('click', (e) => {
+          if (!state.isPickingOriginOnMap) return;
+          const { lat, lng } = e.latlng;
+          const customLabel = state.pendingOriginNameForMap
+            ? state.pendingOriginNameForMap
+            : `自选点 (${lat.toFixed(3)}, ${lng.toFixed(3)})`;
+
+          setOrigin(lat, lng, customLabel, !!state.pendingOriginNameForMap);
+          state.pendingOriginNameForMap = '';
+          togglePickOriginMode(false);
+          showToast(`已将起点设为：${customLabel}`);
+        });
+
+        renderOriginMarker();
+      }
+
+      function renderOriginMarker() {
+        if (!mainMap) return;
+        if (originMarker) mainMap.removeLayer(originMarker);
+
+        const icon = L.divIcon({
+          className: '',
+          html: `<div class="origin-pulse-wrapper"><div class="origin-pulse-ring"></div><div class="origin-dot"></div></div>`,
+          iconSize: [32, 32],
+          iconAnchor: [16, 16]
+        });
+
+        originMarker = L.marker([state.origin.lat, state.origin.lng], { icon, zIndexOffset: 900 })
+          .addTo(mainMap)
+          .bindTooltip(`当前起点：${escapeHtml(state.origin.label)}`, { direction: 'top', offset: [0, -10] });
+
+        document.getElementById('originLabel').textContent = state.origin.label;
+      }
+
+      function setOrigin(lat, lng, label, alsoSaveToList = false) {
+        state.origin = { lat, lng, label };
+        saveCurrentOrigin();
+
+        if (alsoSaveToList) {
+          const existsIdx = state.savedOrigins.findIndex(o => o.label === label);
+          if (existsIdx >= 0) {
+            state.savedOrigins[existsIdx] = { ...state.savedOrigins[existsIdx], lat, lng };
+          } else {
+            state.savedOrigins.unshift({ id: 'origin_' + Date.now(), label, lat, lng });
+          }
+          saveSavedOrigins();
+        }
+
+        renderOriginMarker();
+        processAndRender();
+        mainMap.setView([lat, lng], Math.max(mainMap.getZoom(), 11));
+      }
+
+      function togglePickOriginMode(active) {
+        state.isPickingOriginOnMap = active;
+        const mapEl = document.getElementById('mainMap');
+        const banner = document.getElementById('pickOriginBanner');
+        const btnText = document.getElementById('btnPickOriginText');
+
+        if (active) {
+          mapEl.classList.add('cursor-crosshair-map');
+          banner.classList.remove('hidden');
+          btnText.textContent = '取消选点';
+        } else {
+          mapEl.classList.remove('cursor-crosshair-map');
+          banner.classList.add('hidden');
+          btnText.textContent = '点图设起点';
+        }
+      }
+
+      function renderTargetMarkers() {
+        if (!targetMarkersLayer) return;
+        targetMarkersLayer.clearLayers();
+
+        state.filteredRecords.forEach(item => {
+          const isActive = item.id === state.selectedItemId;
+          const feeLabel = item.feeDisplay || (item.fee > 0 ? `¥${item.fee}` : '面议');
+          const icon = L.divIcon({
+            className: '',
+            html: `<div class="custom-marker-pill ${isActive ? 'active' : ''}">
+                     <span>${escapeHtml(item.subject)}</span>
+                     <span class="${isActive ? 'text-brand-100' : 'text-red-500'}">${escapeHtml(feeLabel)}</span>
+                   </div>`,
+            iconSize: [0, 0],
+            iconAnchor: [0, 0]
+          });
+
+          const marker = L.marker([item.latitude, item.longitude], {
+            icon,
+            zIndexOffset: isActive ? 1000 : 100
+          });
+
+          marker.on('click', () => selectRecord(item.id, true));
+          marker.addTo(targetMarkersLayer);
+        });
+      }
+
+      function drawRouteToRecord(item) {
+        if (routePolyline && mainMap) {
+          mainMap.removeLayer(routePolyline);
+          routePolyline = null;
+        }
+        if (metroRouteLayer) {
+          metroRouteLayer.clearLayers();
+        }
+        if (!item || !mainMap) {
+          document.getElementById('metroRoutePanel').classList.add('hidden');
+          return;
+        }
+
+        const plan = item.metroPlan;
+        const allBoundsPoints = [
+          [state.origin.lat, state.origin.lng],
+          [item.latitude, item.longitude]
+        ];
+
+        if (plan && plan.available) {
+          // 1. 起点步行至进站口（灰色虚线）
+          const startStationCoord = [plan.startWalk.lat, plan.startWalk.lng];
+          L.polyline([[state.origin.lat, state.origin.lng], startStationCoord], {
+            color: '#64748b',
+            weight: 3,
+            dashArray: '6, 6',
+            opacity: 0.9
+          }).addTo(metroRouteLayer);
+
+          // 2. 各段地铁线路（官方对应配色实线）
+          plan.legs.forEach((leg, idx) => {
+            const legCoords = leg.stations
+              .map(st => HZ_METRO_STATIONS[st])
+              .filter(Boolean);
+            legCoords.forEach(c => allBoundsPoints.push(c));
+
+            L.polyline(legCoords, {
+              color: leg.lineColor,
+              weight: 5,
+              opacity: 0.95
+            }).addTo(metroRouteLayer);
+
+            // 标注上车站 / 换乘站
+            const startCoord = HZ_METRO_STATIONS[leg.fromStation];
+            if (startCoord) {
+              const tagText = idx === 0 ? `上车：${leg.fromStation}` : `换乘：${leg.fromStation}`;
+              L.circleMarker(startCoord, {
+                radius: 6,
+                fillColor: '#ffffff',
+                color: leg.lineColor,
+                weight: 3,
+                fillOpacity: 1
+              }).addTo(metroRouteLayer).bindTooltip(tagText, { permanent: false, direction: 'top' });
+            }
+
+            // 标注下车站（仅最后一段）
+            if (idx === plan.legs.length - 1) {
+              const endCoord = HZ_METRO_STATIONS[leg.toStation];
+              if (endCoord) {
+                L.circleMarker(endCoord, {
+                  radius: 6,
+                  fillColor: '#ffffff',
+                  color: leg.lineColor,
+                  weight: 3,
+                  fillOpacity: 1
+                }).addTo(metroRouteLayer).bindTooltip(`下车：${leg.toStation}`, { permanent: false, direction: 'top' });
+              }
+            }
+          });
+
+          // 3. 出站口步行至目的地（灰色虚线）
+          const endStationCoord = [plan.endWalk.lat, plan.endWalk.lng];
+          L.polyline([endStationCoord, [item.latitude, item.longitude]], {
+            color: '#64748b',
+            weight: 3,
+            dashArray: '6, 6',
+            opacity: 0.9
+          }).addTo(metroRouteLayer);
+        } else {
+          // 无内置地铁路线时，保留蓝色动态直连折线
+          routePolyline = L.polyline(allBoundsPoints, {
+            color: '#1677ff',
+            weight: 4,
+            opacity: 0.9,
+            className: 'route-polyline-animated'
+          }).addTo(mainMap);
+        }
+
+        mainMap.fitBounds(L.latLngBounds(allBoundsPoints), { padding: [60, 60], maxZoom: 14 });
+        renderMetroRoutePanel(item);
+      }
+
+      // 渲染地图左下角的地铁直达/换乘详细指引面板
+      function renderMetroRoutePanel(item) {
+        const panel = document.getElementById('metroRoutePanel');
+        const titleEl = document.getElementById('metroPanelTitle');
+        const subEl = document.getElementById('metroPanelSub');
+        const bodyEl = document.getElementById('metroPanelBody');
+        const navBtn = document.getElementById('btnOpenGaodeNav');
+
+        if (!item) {
+          panel.classList.add('hidden');
+          return;
+        }
+
+        // 生成高德地图一键实时公交换乘链接
+        const fromStr = `${state.origin.lng},${state.origin.lat},${encodeURIComponent(state.origin.label || '起点')}`;
+        const toStr = `${item.longitude},${item.latitude},${encodeURIComponent(item.address || item.title)}`;
+        navBtn.href = `https://uri.amap.com/navigation?from=${fromStr}&to=${toStr}&mode=bus&coordinate=gaode&callnative=1`;
+
+        const plan = item.metroPlan;
+        if (!plan || !plan.available) {
+          titleEl.textContent = `前往：${item.title}`;
+          subEl.textContent = `距起点约 ${item.distanceText} · 预估公交地铁 ${item.durations.transit}`;
+          bodyEl.innerHTML = `
+            <div class="bg-amber-50/80 border border-amber-200/80 rounded-xl p-3 text-amber-800 leading-relaxed">
+              <div class="font-semibold mb-1">ℹ️ 暂无内置地铁换乘方案</div>
+              <div class="text-[11px]">${escapeHtml(plan ? plan.reason : '可点击右下角使用高德实时公交换乘')}</div>
+            </div>
+          `;
+          panel.classList.remove('hidden');
+          return;
+        }
+
+        const transferBadge = plan.transfers === 0 ? '直达免换乘' : `换乘 ${plan.transfers} 次`;
+        titleEl.textContent = `${plan.summaryLineNames}（${transferBadge}）`;
+        subEl.textContent = `总耗时约 ${plan.totalTimeText} · 共 ${plan.totalStops} 站 · 步行约 ${plan.totalWalkMeters}m`;
+
+        const stepsHtml = [];
+
+        // 步骤 1：步行进站
+        const startWalkM = Math.round(plan.startWalk.walkKm * 1000);
+        stepsHtml.push(`
+          <div class="flex items-start gap-2.5">
+            <div class="flex flex-col items-center mt-0.5">
+              <span class="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-[10px] font-bold">起</span>
+              <div class="w-0.5 h-6 bg-slate-200 my-0.5"></div>
+            </div>
+            <div class="flex-1 pb-1">
+              <div class="text-slate-700 font-medium">从 <strong class="text-slate-900">${escapeHtml(state.origin.label)}</strong> 步行约 ${startWalkM}m（${plan.startWalk.walkMin}分钟）</div>
+              <div class="text-[11px] text-slate-500 mt-0.5">到达地铁 <strong class="text-slate-800">${escapeHtml(plan.startWalk.name)}站</strong> 进站</div>
+            </div>
+          </div>
+        `);
+
+        // 步骤 2..N：地铁乘车段与换乘节点
+        plan.legs.forEach((leg, idx) => {
+          if (idx > 0) {
+            stepsHtml.push(`
+              <div class="flex items-start gap-2.5">
+                <div class="flex flex-col items-center mt-0.5">
+                  <span class="w-5 h-5 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center text-[10px] font-bold">换</span>
+                  <div class="w-0.5 h-5 bg-slate-200 my-0.5"></div>
+                </div>
+                <div class="flex-1 pb-1">
+                  <div class="text-amber-700 font-semibold">在 ${escapeHtml(leg.fromStation)}站 站内换乘（约 6 分钟）</div>
+                </div>
+              </div>
+            `);
+          }
+
+          stepsHtml.push(`
+            <div class="flex items-start gap-2.5">
+              <div class="flex flex-col items-center mt-0.5">
+                <span class="w-5 h-5 rounded-full text-white flex items-center justify-center text-[10px] font-bold" style="background:${leg.lineColor}">铁</span>
+                <div class="w-0.5 flex-1 min-h-[28px] my-0.5" style="background:${leg.lineColor}"></div>
+              </div>
+              <div class="flex-1 bg-slate-50 border border-slate-200/80 rounded-xl p-2.5 mb-1">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="px-2 py-0.5 rounded-md text-white text-[11px] font-bold" style="background:${leg.lineColor}">${escapeHtml(leg.lineName)}</span>
+                  <span class="text-[11px] text-slate-500">共 ${leg.stopCount} 站 · 约 ${leg.rideMin} 分钟</span>
+                </div>
+                <div class="mt-1.5 text-slate-800 font-semibold">
+                  ${escapeHtml(leg.fromStation)}站 <span class="text-slate-400 font-normal mx-1">→</span> ${escapeHtml(leg.toStation)}站
+                </div>
+                <div class="text-[11px] text-slate-500 mt-0.5">开往 ${escapeHtml(leg.direction)} 方向</div>
+              </div>
+            </div>
+          `);
+        });
+
+        // 最后一步：出站步行至目的地
+        const endWalkM = Math.round(plan.endWalk.walkKm * 1000);
+        stepsHtml.push(`
+          <div class="flex items-start gap-2.5">
+            <div class="flex flex-col items-center mt-0.5">
+              <span class="w-5 h-5 rounded-full bg-brand-100 text-brand-700 flex items-center justify-center text-[10px] font-bold">终</span>
+            </div>
+            <div class="flex-1">
+              <div class="text-slate-700 font-medium">从 <strong class="text-slate-800">${escapeHtml(plan.endWalk.name)}站</strong> 出站，步行约 ${endWalkM}m（${plan.endWalk.walkMin}分钟）</div>
+              <div class="text-[11px] text-slate-500 mt-0.5 truncate" title="${escapeHtml(item.address)}">到达：${escapeHtml(item.address)}</div>
+            </div>
+          </div>
+        `);
+
+        bodyEl.innerHTML = stepsHtml.join('');
+        panel.classList.remove('hidden');
+      }
+
+      function selectRecord(id, scrollCardIntoView = false) {
+        state.selectedItemId = id;
+        const target = state.filteredRecords.find(r => r.id === id);
+        renderCardList();
+        renderTargetMarkers();
+        if (target) {
+          drawRouteToRecord(target);
+          if (scrollCardIntoView) {
+            const cardEl = document.querySelector(`[data-card-id="${id}"]`);
+            if (cardEl) cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          }
+        }
+      }
+
+      // =========================================================================
+      // 6. 数据处理、多维筛选与列表渲染
+      // =========================================================================
+      /**
+       * 统一的筛选评估函数：同时服务于主列表筛选与「核对与比对」弹窗，
+       * 确保主界面的筛选结果与核对面板展示的原因 100% 一致。
+       */
+      function evaluateRecordAgainstFilters(item) {
+        const kw = state.searchKeyword.trim().toLowerCase();
+        const f = state.filters;
+        const feeRule = OPTIONS.feeRanges[f.feeIndex] || OPTIONS.feeRanges[0];
+        const regionKw = (f.region || '').trim().toLowerCase();
+        const normalizedSlot = normalizeTimeSlot(item.timeSlot);
+
+        const reasons = [];
+        const failedFields = new Set();
+        const matchedFields = new Set();
+        let note = '';
+
+        // 1. 搜索关键词
+        if (kw) {
+          const hitKw =
+            (item.title || '').toLowerCase().includes(kw) ||
+            (item.content || '').toLowerCase().includes(kw) ||
+            (item.address || '').toLowerCase().includes(kw) ||
+            (item.region || '').toLowerCase().includes(kw) ||
+            (item.subject || '').toLowerCase().includes(kw);
+          if (hitKw) matchedFields.add('keyword');
+          else {
+            failedFields.add('keyword');
+            reasons.push(`不含搜索词「${state.searchKeyword.trim()}」`);
+          }
+        }
+
+        // 2. 学科科目
+        if (f.subject !== '全部') {
+          if (item.subject === f.subject) matchedFields.add('subject');
+          else {
+            failedFields.add('subject');
+            reasons.push(`学科不符（提取为「${item.subject}」，筛选「${f.subject}」）`);
+          }
+        }
+
+        // 3. 年级段
+        if (f.grade !== '全部') {
+          if (item.grade === f.grade) matchedFields.add('grade');
+          else {
+            failedFields.add('grade');
+            reasons.push(`年级段不符（提取为「${item.grade}」，筛选「${f.grade}」）`);
+          }
+        }
+
+        // 4. 时间段（含防漏单逻辑）
+        if (f.timeSlot !== '全部') {
+          if (f.timeSlot === '时间灵活/协商') {
+            if (normalizedSlot === '时间灵活/协商') matchedFields.add('timeSlot');
+            else {
+              failedFields.add('timeSlot');
+              reasons.push(`时段不符（提取为「${normalizedSlot}」，筛选「时间灵活/协商」）`);
+            }
+          } else {
+            if (normalizedSlot === f.timeSlot) {
+              matchedFields.add('timeSlot');
+            } else if (f.includeFlexibleTime && normalizedSlot === '时间灵活/协商') {
+              matchedFields.add('timeSlot');
+              note = '因开启「含协商防漏单」而保留';
+            } else {
+              failedFields.add('timeSlot');
+              reasons.push(`时段不符（提取为「${normalizedSlot}」，筛选「${f.timeSlot}」）`);
+            }
+          }
+        }
+
+        // 5. 薪资区间
+        if (f.feeIndex !== 0) {
+          const itemMin = typeof item.feeMin === 'number' && item.feeMin > 0 ? item.feeMin : (item.fee || 0);
+          const itemMax = typeof item.feeMax === 'number' && item.feeMax > 0 ? item.feeMax : (item.fee || 0);
+          if (itemMax >= feeRule.min && itemMin <= feeRule.max) {
+            matchedFields.add('fee');
+          } else {
+            failedFields.add('fee');
+            const displayFee = item.feeDisplay || (item.fee > 0 ? `¥${item.fee}/时` : '面议');
+            reasons.push(`薪资不符（提取为「${displayFee}」，筛选「${feeRule.label}」）`);
+          }
+        }
+
+        // 6. 性别要求
+        if (f.gender !== '不限') {
+          if (item.gender === f.gender || item.gender === '不限') matchedFields.add('gender');
+          else {
+            failedFields.add('gender');
+            reasons.push(`性别要求不符（提取为「${item.gender}」，筛选「${f.gender}」）`);
+          }
+        }
+
+        // 7. 师资身份
+        if (f.teacherType !== '不限') {
+          if (item.teacherType === f.teacherType || item.teacherType === '不限') matchedFields.add('teacherType');
+          else {
+            failedFields.add('teacherType');
+            reasons.push(`师资身份不符（提取为「${item.teacherType || '不限'}」，筛选「${f.teacherType}」）`);
+          }
+        }
+
+        // 8. 双语
+        if (f.bilingual !== '不限') {
+          const ok = f.bilingual === '是' ? !!item.isBilingual : !item.isBilingual;
+          if (ok) matchedFields.add('bilingual');
+          else {
+            failedFields.add('bilingual');
+            reasons.push(`双语不符（提取为「${item.isBilingual ? '是' : '否'}」，筛选「${f.bilingual}」）`);
+          }
+        }
+
+        // 9. 国际
+        if (f.international !== '不限') {
+          const ok = f.international === '是' ? !!item.isInternational : !item.isInternational;
+          if (ok) matchedFields.add('international');
+          else {
+            failedFields.add('international');
+            reasons.push(`国际课程不符（提取为「${item.isInternational ? '是' : '否'}」，筛选「${f.international}」）`);
+          }
+        }
+
+        // 10. 所属地区
+        if (regionKw) {
+          const hitReg =
+            (item.region || '').toLowerCase().includes(regionKw) ||
+            (item.address || '').toLowerCase().includes(regionKw);
+          if (hitReg) matchedFields.add('region');
+          else {
+            failedFields.add('region');
+            reasons.push(`地区不符（提取为「${item.region || item.address}」，筛选含「${f.region.trim()}」）`);
+          }
+        }
+
+        return {
+          passed: reasons.length === 0,
+          reasons,
+          failedFields,
+          matchedFields,
+          note
+        };
+      }
+
+      function processAndRender() {
+        // 计算距离、6 种交通时长与地铁换乘方案
+        const enriched = state.rawRecords.map(item => {
+          const straightKm = calculateHaversineKm(state.origin.lat, state.origin.lng, item.latitude, item.longitude);
+          const roadKm = straightKm * 1.25;
+          const durations = estimateTransportDurations(roadKm);
+          const metroPlan = planMetroRoute(state.origin.lat, state.origin.lng, item.latitude, item.longitude);
+          if (metroPlan && metroPlan.available) {
+            durations.transit = metroPlan.totalTimeText;
+          }
+          return {
+            ...item,
+            timeSlot: normalizeTimeSlot(item.timeSlot),
+            distanceKm: roadKm,
+            distanceText: roadKm < 1 ? `${Math.round(roadKm * 1000)}m` : `${roadKm.toFixed(1)}km`,
+            durations,
+            metroPlan
+          };
+        });
+
+        // 使用统一评估函数过滤
+        const filtered = enriched.filter(item => evaluateRecordAgainstFilters(item).passed);
+
+        filtered.sort((a, b) => a.distanceKm - b.distanceKm);
+        state.filteredRecords = filtered;
+
+        // 若当前选中项已不在筛选结果中，清除路线折线与地铁详情面板
+        if (state.selectedItemId && !filtered.some(r => r.id === state.selectedItemId)) {
+          state.selectedItemId = null;
+          if (routePolyline && mainMap) {
+            mainMap.removeLayer(routePolyline);
+            routePolyline = null;
+          }
+          if (metroRouteLayer) metroRouteLayer.clearLayers();
+          document.getElementById('metroRoutePanel').classList.add('hidden');
+        } else if (state.selectedItemId) {
+          // 若当前选中项仍在列表中（例如切换了起点），同步刷新地铁路线和详情面板
+          const activeItem = filtered.find(r => r.id === state.selectedItemId);
+          if (activeItem) drawRouteToRecord(activeItem);
+        }
+
+        renderFilterSummary();
+        renderCardList();
+        renderTargetMarkers();
+      }
+
+      function renderCardList() {
+        const container = document.getElementById('cardListContainer');
+        const countEl = document.getElementById('resultCount');
+        const totalEl = document.getElementById('totalRecordCount');
+        countEl.textContent = state.filteredRecords.length;
+        if (totalEl) totalEl.textContent = state.rawRecords.length;
+
+        if (state.filteredRecords.length === 0) {
+          container.innerHTML = `
+            <div class="bg-white rounded-2xl border border-dashed border-slate-300 p-8 text-center">
+              <div class="text-slate-400 text-sm">暂无符合条件的信息</div>
+              <p class="text-xs text-slate-400 mt-1.5">可尝试放宽筛选条件，或点击右上角「+ 录入信息」批量粘贴导入</p>
+            </div>`;
+          return;
+        }
+
+        container.innerHTML = state.filteredRecords.map(item => {
+          const isActive = item.id === state.selectedItemId;
+          const feeStr = item.feeDisplay || (item.fee > 0 ? `¥${item.fee}/时` : '面议');
+          const isFlexTime = item.timeSlot === '时间灵活/协商';
+
+          return `
+            <article data-card-id="${item.id}"
+              class="card-item group bg-white rounded-2xl p-3.5 border-2 transition cursor-pointer shadow-sm hover:shadow-md ${isActive ? 'border-brand-500 ring-2 ring-brand-500/15' : 'border-transparent hover:border-slate-200'}">
+              <div class="flex items-start justify-between gap-2 mb-2">
+                <h3 class="text-sm font-bold text-slate-900 leading-snug">${escapeHtml(item.title)}</h3>
+                <div class="flex items-center gap-2 flex-shrink-0">
+                  <span class="text-sm font-bold text-red-500 whitespace-nowrap">${escapeHtml(feeStr)}</span>
+                  <button type="button" data-delete-id="${item.id}" title="删除该条记录"
+                    class="btn-delete-card opacity-70 sm:opacity-0 group-hover:opacity-100 w-6 h-6 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500 flex items-center justify-center text-xs transition">
+                    ✕
+                  </button>
+                </div>
+              </div>
+
+              <!-- 属性标签 -->
+              <div class="flex flex-wrap gap-1.5 mb-2">
+                <span class="px-2 py-0.5 rounded-md text-[11px] font-medium bg-brand-50 text-brand-600">${escapeHtml(item.subject)}</span>
+                <span class="px-2 py-0.5 rounded-md text-[11px] font-medium bg-sky-50 text-sky-700">${escapeHtml(item.grade)}</span>
+                <span class="px-2 py-0.5 rounded-md text-[11px] font-medium ${isFlexTime ? 'bg-teal-50 text-teal-700' : 'bg-slate-100 text-slate-600'}">${escapeHtml(item.timeSlot)}</span>
+                ${item.teacherType && item.teacherType !== '不限' ? `<span class="px-2 py-0.5 rounded-md text-[11px] font-medium bg-emerald-50 text-emerald-700">${escapeHtml(item.teacherType)}</span>` : ''}
+                ${item.gender && item.gender !== '不限' ? `<span class="px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 text-slate-600">要求：${escapeHtml(item.gender)}</span>` : ''}
+                ${item.isBilingual ? `<span class="px-2 py-0.5 rounded-md text-[11px] font-medium bg-amber-50 text-amber-700">双语</span>` : ''}
+                ${item.isInternational ? `<span class="px-2 py-0.5 rounded-md text-[11px] font-medium bg-purple-50 text-purple-700">国际</span>` : ''}
+              </div>
+
+              <!-- 文本正文 -->
+              <p class="text-xs text-slate-600 leading-relaxed line-clamp-2 mb-2">${escapeHtml(item.content)}</p>
+
+              <!-- 原文查看与一键复制快捷按钮 -->
+              <div class="flex items-center gap-2 mb-2.5">
+                <button type="button" data-view-raw-id="${item.id}"
+                  class="btn-view-raw inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-brand-50 hover:text-brand-600 text-slate-600 text-[11px] font-medium transition active:scale-95">
+                  <span>📄 查看原文</span>
+                </button>
+                <button type="button" data-copy-raw-id="${item.id}"
+                  class="btn-copy-raw inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-600 text-[11px] font-medium transition active:scale-95">
+                  <span>📋 一键复制</span>
+                </button>
+              </div>
+
+              <!-- 位置与距离 -->
+              <div class="flex items-center justify-between gap-2 text-xs pb-2 mb-2 border-b border-dashed border-slate-200">
+                <span class="text-slate-500 truncate" title="${escapeHtml(item.address)}">📍 ${escapeHtml(item.address)}</span>
+                <span class="text-amber-600 font-semibold whitespace-nowrap">距起点约 ${escapeHtml(item.distanceText)}</span>
+              </div>
+
+              <!-- 地铁直达 / 换乘方案速览条 -->
+              ${item.metroPlan && item.metroPlan.available ? `
+                <div class="mb-2 px-2.5 py-1.5 rounded-xl bg-brand-50/70 border border-brand-100 flex items-center justify-between gap-2 text-[11px]">
+                  <div class="flex items-center gap-1.5 min-w-0 truncate">
+                    <span class="flex-shrink-0">🚇</span>
+                    <span class="font-semibold text-brand-700 truncate">${escapeHtml(item.metroPlan.summaryLineNames)}</span>
+                    <span class="px-1.5 py-0.2 rounded bg-white text-brand-600 border border-brand-200/80 text-[10px] flex-shrink-0">
+                      ${item.metroPlan.transfers === 0 ? '直达' : `换乘${item.metroPlan.transfers}次`}
+                    </span>
+                  </div>
+                  <span class="text-slate-500 flex-shrink-0 whitespace-nowrap">${item.metroPlan.totalStops}站 · 详情 ▸</span>
+                </div>
+              ` : ''}
+
+              <!-- 6种交通方式时长 -->
+              <div class="grid grid-cols-6 gap-1 bg-slate-50 rounded-xl p-2 text-center">
+                <div>
+                  <div class="text-[10px] text-slate-400">步行</div>
+                  <div class="text-[11px] font-semibold text-slate-700 mt-0.5">${escapeHtml(item.durations.walk)}</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-400">骑行</div>
+                  <div class="text-[11px] font-semibold text-slate-700 mt-0.5">${escapeHtml(item.durations.bike)}</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-400">电动车</div>
+                  <div class="text-[11px] font-semibold text-slate-700 mt-0.5">${escapeHtml(item.durations.ebike)}</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-400">公交地铁</div>
+                  <div class="text-[11px] font-semibold text-brand-600 mt-0.5">${escapeHtml(item.durations.transit)}</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-400">汽车</div>
+                  <div class="text-[11px] font-semibold text-slate-700 mt-0.5">${escapeHtml(item.durations.car)}</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-400">高铁</div>
+                  <div class="text-[11px] font-semibold text-slate-700 mt-0.5">${escapeHtml(item.durations.hsr)}</div>
+                </div>
+              </div>
+            </article>
+          `;
+        }).join('');
+      }
+
+      // =========================================================================
+      // 7. 筛选摘要标签与 9 维度筛选弹窗渲染
+      // =========================================================================
+      function renderFilterSummary() {
+        const f = state.filters;
+        const activeTags = [];
+
+        if (f.subject !== '全部') activeTags.push({ key: 'subject', label: `学科：${f.subject}` });
+        if (f.grade !== '全部') activeTags.push({ key: 'grade', label: `年级：${f.grade}` });
+        if (f.timeSlot !== '全部') {
+          const flexHint = (f.timeSlot !== '时间灵活/协商' && f.includeFlexibleTime) ? ' (含协商)' : '';
+          activeTags.push({ key: 'timeSlot', label: `时段：${f.timeSlot}${flexHint}` });
+        }
+        if (f.feeIndex !== 0) activeTags.push({ key: 'feeIndex', label: `薪资：${OPTIONS.feeRanges[f.feeIndex].label}` });
+        if (f.gender !== '不限') activeTags.push({ key: 'gender', label: `性别：${f.gender}` });
+        if (f.teacherType !== '不限') activeTags.push({ key: 'teacherType', label: `师资：${f.teacherType}` });
+        if (f.bilingual !== '不限') activeTags.push({ key: 'bilingual', label: `双语：${f.bilingual}` });
+        if (f.international !== '不限') activeTags.push({ key: 'international', label: `国际：${f.international}` });
+        if (f.region.trim()) activeTags.push({ key: 'region', label: `地区：${f.region.trim()}` });
+
+        const badge = document.getElementById('filterCountBadge');
+        const summaryEl = document.getElementById('activeFilterSummary');
+
+        if (activeTags.length > 0) {
+          badge.textContent = activeTags.length;
+          badge.classList.remove('hidden');
+          summaryEl.classList.remove('hidden');
+          summaryEl.innerHTML = activeTags.map(t => `
+            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-brand-50 text-brand-700 border border-brand-100 text-[11px] font-medium">
+              <span>${escapeHtml(t.label)}</span>
+              <button type="button" data-remove-filter="${t.key}" class="hover:text-brand-900 ml-0.5 leading-none">✕</button>
+            </span>
+          `).join('');
+        } else {
+          badge.classList.add('hidden');
+          summaryEl.classList.add('hidden');
+          summaryEl.innerHTML = '';
+        }
+      }
+
+      function renderFilterModalBody() {
+        const d = state.draftFilters;
+        const bodyEl = document.getElementById('filterModalBody');
+
+        const renderChipGroup = (title, field, items, isIndex = false) => {
+          const chipsHtml = items.map((item, idx) => {
+            const label = isIndex ? item.label : item;
+            const val = isIndex ? idx : item;
+            const isSelected = d[field] === val;
+            return `
+              <button type="button"
+                data-filter-field="${field}"
+                data-filter-val="${escapeHtml(val)}"
+                data-is-index="${isIndex ? '1' : '0'}"
+                class="filter-chip px-3 py-1.5 rounded-xl text-xs font-medium border transition ${
+                  isSelected
+                    ? 'bg-brand-500 text-white border-brand-500 shadow-sm'
+                    : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+                }">
+                ${escapeHtml(label)}
+              </button>`;
+          }).join('');
+
+          return `
+            <div>
+              <div class="text-xs font-bold text-slate-700 mb-2">${title}</div>
+              <div class="flex flex-wrap gap-2">${chipsHtml}</div>
+            </div>`;
+        };
+
+        // 收集已有地区 + 内置常用地区作为快捷点选标签
+        const regionSet = new Set(['杭州市萧山区', '余杭区', '钱塘区', '西湖区', '滨江区']);
+        state.rawRecords.forEach(r => {
+          if (r.region && r.region !== '未标注地区') regionSet.add(r.region);
+        });
+        const quickRegions = Array.from(regionSet).slice(0, 10);
+
+        bodyEl.innerHTML = `
+          ${renderChipGroup('1. 学科科目', 'subject', OPTIONS.subjects)}
+          ${renderChipGroup('2. 年级段', 'grade', OPTIONS.grades)}
+          <div>
+            ${renderChipGroup('3. 时间段', 'timeSlot', OPTIONS.timeSlots)}
+            <label class="mt-2.5 inline-flex items-center gap-2 cursor-pointer text-xs text-slate-600 select-none">
+              <input id="draftIncludeFlexibleTime" type="checkbox" ${d.includeFlexibleTime ? 'checked' : ''}
+                class="w-4 h-4 rounded text-brand-500 border-slate-300 focus:ring-brand-500" />
+              <span>筛选具体时段时，同时保留「时间灵活/协商」单子（防漏单）</span>
+            </label>
+          </div>
+          ${renderChipGroup('4. 薪资范围（元/小时）', 'feeIndex', OPTIONS.feeRanges, true)}
+          ${renderChipGroup('5. 性别要求', 'gender', OPTIONS.genders)}
+          ${renderChipGroup('6. 师资身份', 'teacherType', OPTIONS.teacherTypes)}
+          ${renderChipGroup('7. 双语要求', 'bilingual', OPTIONS.boolOptions)}
+          ${renderChipGroup('8. 国际课程 / 学校', 'international', OPTIONS.boolOptions)}
+          <div>
+            <div class="text-xs font-bold text-slate-700 mb-2">9. 所属地区（支持模糊搜索，如：杭州、萧山、余杭区）</div>
+            <input id="draftRegionInput" type="text" value="${escapeHtml(d.region || '')}" placeholder="输入省/市/区县关键词，留空表示不限"
+              class="w-full bg-slate-50 focus:bg-white border border-slate-200 focus:border-brand-500 rounded-xl px-3 py-2 text-sm text-slate-700 outline-none transition" />
+            <div class="flex flex-wrap gap-1.5 mt-2">
+              <button type="button" data-quick-region=""
+                class="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] font-medium transition">
+                不限地区
+              </button>
+              ${quickRegions.map(reg => `
+                <button type="button" data-quick-region="${escapeHtml(reg)}"
+                  class="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-brand-50 hover:text-brand-600 text-slate-600 text-[11px] font-medium transition">
+                  ${escapeHtml(reg)}
+                </button>
+              `).join('')}
+            </div>
+          </div>
+        `;
+      }
+
+      // =========================================================================
+      // 8. 录入表单初始化、折叠微调区与内置选点小地图
+      // =========================================================================
+      function populateFormSelects() {
+        const fillSelect = (id, list) => {
+          const el = document.getElementById(id);
+          if (!el) return;
+          el.innerHTML = list.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+        };
+        fillSelect('formSubject', OPTIONS.subjects.filter(s => s !== '全部'));
+        fillSelect('formGrade', OPTIONS.grades.filter(g => g !== '全部'));
+        fillSelect('formTimeSlot', OPTIONS.timeSlots.filter(t => t !== '全部'));
+      }
+
+      function updateBatchButtonLabel() {
+        const raw = document.getElementById('formRawText').value.trim();
+        const btn = document.getElementById('btnBatchImport');
+        if (!btn) return;
+        if (!raw) {
+          btn.textContent = '⚡ 一键导入';
+          return;
+        }
+        const count = splitOrderBlocks(raw).length;
+        btn.textContent = count > 1 ? `⚡ 批量一键导入 (${count}条)` : '⚡ 一键导入 (1条)';
+      }
+
+      function resetInputForm() {
+        document.getElementById('formRawText').value = '';
+        document.getElementById('formTitle').value = '';
+        document.getElementById('formFee').value = '';
+        document.getElementById('formSubject').value = '英语';
+        document.getElementById('formGrade').value = '小学';
+        document.getElementById('formTimeSlot').value = '时间灵活/协商';
+        document.getElementById('formGender').value = '不限';
+        document.getElementById('formTeacherType').value = '不限';
+        document.getElementById('formRegion').value = '';
+        document.getElementById('formAddress').value = '';
+        document.getElementById('formBilingual').checked = false;
+        document.getElementById('formInternational').checked = false;
+        document.getElementById('formCoordStatus').textContent = '点击下方地图选取精准坐标';
+
+        state.pickerCoord = null;
+        if (pickerMarker && pickerMap) {
+          pickerMap.removeLayer(pickerMarker);
+          pickerMarker = null;
+        }
+        updateBatchButtonLabel();
+      }
+
+      function initPickerMap() {
+        if (pickerMap) return;
+        const container = document.getElementById('pickerMap');
+        if (!container) return;
+
+        pickerMap = L.map('pickerMap', {
+          center: [state.origin.lat, state.origin.lng],
+          zoom: 11,
+          zoomControl: true
+        });
+
+        L.tileLayer(GAODE_TILE_URL, {
+          subdomains: ['1', '2', '3', '4'],
+          maxZoom: 18,
+          attribution: '&copy; 高德地图'
+        }).addTo(pickerMap);
+
+        pickerMap.on('click', (e) => {
+          setPickerCoord(e.latlng.lat, e.latlng.lng);
+        });
+      }
+
+      function setPickerCoord(lat, lng) {
+        state.pickerCoord = { lat, lng };
+        const statusEl = document.getElementById('formCoordStatus');
+        if (statusEl) {
+          statusEl.textContent = `已选坐标：${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+        }
+        if (pickerMap) {
+          if (pickerMarker) pickerMap.removeLayer(pickerMarker);
+          pickerMarker = L.marker([lat, lng]).addTo(pickerMap);
+          pickerMap.setView([lat, lng], Math.max(pickerMap.getZoom(), 12));
+        }
+      }
+
+      function setManualEditExpanded(expanded) {
+        state.isManualEditExpanded = expanded;
+        const section = document.getElementById('manualEditSection');
+        const saveBtn = document.getElementById('btnSaveRecord');
+        const toggleText = document.getElementById('toggleManualEditText');
+
+        if (expanded) {
+          section.classList.remove('hidden');
+          saveBtn.classList.remove('hidden');
+          toggleText.textContent = '收起手动微调 / 地图精准选点 ▴';
+          initPickerMap();
+          setTimeout(() => {
+            if (pickerMap) {
+              pickerMap.invalidateSize();
+              if (state.pickerCoord) {
+                setPickerCoord(state.pickerCoord.lat, state.pickerCoord.lng);
+              } else {
+                pickerMap.setView([state.origin.lat, state.origin.lng], 11);
+              }
+            }
+          }, 80);
+        } else {
+          section.classList.add('hidden');
+          saveBtn.classList.add('hidden');
+          toggleText.textContent = '展开手动微调 / 地图精准选点 ▾';
+        }
+      }
+
+      // =========================================================================
+      // 9. 常用起点管理弹窗 & 筛选核对与比对弹窗
+      // =========================================================================
+      function renderAuditModal() {
+        const f = state.filters;
+        const kw = state.searchKeyword.trim();
+
+        // 1. 渲染当前生效的筛选条件摘要
+        const activeRules = [];
+        if (kw) activeRules.push(`关键词：${kw}`);
+        if (f.subject !== '全部') activeRules.push(`学科：${f.subject}`);
+        if (f.grade !== '全部') activeRules.push(`年级：${f.grade}`);
+        if (f.timeSlot !== '全部') {
+          const suffix = (f.timeSlot !== '时间灵活/协商' && f.includeFlexibleTime) ? '（含协商防漏单）' : '';
+          activeRules.push(`时段：${f.timeSlot}${suffix}`);
+        }
+        if (f.feeIndex !== 0) activeRules.push(`薪资：${OPTIONS.feeRanges[f.feeIndex].label}`);
+        if (f.gender !== '不限') activeRules.push(`性别：${f.gender}`);
+        if (f.teacherType !== '不限') activeRules.push(`师资：${f.teacherType}`);
+        if (f.bilingual !== '不限') activeRules.push(`双语：${f.bilingual}`);
+        if (f.international !== '不限') activeRules.push(`国际：${f.international}`);
+        if (f.region.trim()) activeRules.push(`地区：${f.region.trim()}`);
+
+        const rulesEl = document.getElementById('auditActiveRules');
+        rulesEl.innerHTML = activeRules.length > 0
+          ? `<span class="text-slate-500 font-medium">当前筛选条件：</span>` +
+            activeRules.map(r => `<span class="px-2 py-0.5 rounded-md bg-brand-50 text-brand-700 border border-brand-100 text-[11px] font-medium">${escapeHtml(r)}</span>`).join('')
+          : `<span class="text-slate-500">当前未设置任何筛选条件（全部录入信息均处于命中状态）</span>`;
+
+        // 2. 对所有录入记录执行评估
+        const evaluated = state.rawRecords.map(item => ({
+          item: { ...item, timeSlot: normalizeTimeSlot(item.timeSlot) },
+          evalRes: evaluateRecordAgainstFilters(item)
+        }));
+
+        const matchedCount = evaluated.filter(e => e.evalRes.passed).length;
+        const excludedCount = evaluated.length - matchedCount;
+
+        document.getElementById('auditCountAll').textContent = evaluated.length;
+        document.getElementById('auditCountMatched').textContent = matchedCount;
+        document.getElementById('auditCountExcluded').textContent = excludedCount;
+
+        // 3. 更新 Tab 高亮状态
+        document.querySelectorAll('.audit-tab-btn').forEach(btn => {
+          const isCurrent = btn.dataset.auditTab === state.auditTab;
+          btn.className = `audit-tab-btn px-3 py-1 rounded-lg text-xs font-semibold transition ${
+            isCurrent ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+          }`;
+        });
+
+        // 4. 按 Tab 过滤展示列表
+        const listToShow = evaluated.filter(({ evalRes }) => {
+          if (state.auditTab === 'matched') return evalRes.passed;
+          if (state.auditTab === 'excluded') return !evalRes.passed;
+          return true;
+        });
+
+        const listEl = document.getElementById('auditListContainer');
+        if (listToShow.length === 0) {
+          listEl.innerHTML = `
+            <div class="bg-white rounded-2xl border border-dashed border-slate-300 p-8 text-center text-xs text-slate-400">
+              该分类下暂无记录
+            </div>`;
+          return;
+        }
+
+        const fieldCellClass = (fieldKey, evalRes) => {
+          if (evalRes.failedFields.has(fieldKey)) {
+            return 'bg-red-50 border-red-200 text-red-700 font-semibold';
+          }
+          if (evalRes.matchedFields.has(fieldKey)) {
+            return 'bg-emerald-50 border-emerald-200 text-emerald-700 font-semibold';
+          }
+          return 'bg-slate-50 border-slate-200/70 text-slate-700';
+        };
+
+        listEl.innerHTML = listToShow.map(({ item, evalRes }) => {
+          const feeStr = item.feeDisplay || (item.fee > 0 ? `¥${item.fee}/时` : '面议');
+          return `
+            <div class="bg-white rounded-2xl border ${evalRes.passed ? 'border-emerald-200/80' : 'border-red-200/80'} shadow-sm overflow-hidden">
+              <!-- 卡片头部：标题与判定结果 -->
+              <div class="px-4 py-2.5 ${evalRes.passed ? 'bg-emerald-50/50' : 'bg-red-50/50'} border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                <div class="flex items-center gap-2 min-w-0">
+                  <span class="px-2 py-0.5 rounded-full text-[11px] font-bold flex-shrink-0 ${evalRes.passed ? 'bg-emerald-500 text-white' : 'bg-red-500 text-white'}">
+                    ${evalRes.passed ? '✅ 已筛出' : '❌ 被排除'}
+                  </span>
+                  <h4 class="text-sm font-bold text-slate-900 truncate">${escapeHtml(item.title)}</h4>
+                </div>
+                ${evalRes.note ? `<span class="text-[11px] text-teal-700 bg-teal-50 border border-teal-200 px-2 py-0.5 rounded-md">${escapeHtml(evalRes.note)}</span>` : ''}
+              </div>
+
+              <!-- 未命中原因提示条 -->
+              ${!evalRes.passed ? `
+                <div class="px-4 py-2 bg-red-50/30 border-b border-red-100 text-xs text-red-600 flex flex-wrap items-center gap-1.5">
+                  <span class="font-semibold">排除原因：</span>
+                  ${evalRes.reasons.map(r => `<span class="px-2 py-0.5 rounded bg-red-100/80 text-red-700">${escapeHtml(r)}</span>`).join('')}
+                </div>
+              ` : ''}
+
+              <!-- 左右/上下对比区：录入原文 vs 系统提取字段 -->
+              <div class="p-4 grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                <!-- 录入的完整原始文字 -->
+                <div class="bg-slate-50 rounded-xl p-3 border border-slate-200/70">
+                  <div class="text-[11px] font-bold text-slate-500 mb-1.5 flex items-center justify-between">
+                    <span>📄 录入的原始文字</span>
+                    ${evalRes.failedFields.has('keyword') ? '<span class="text-red-500">未包含搜索词</span>' : ''}
+                  </div>
+                  <div class="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap break-words max-h-40 overflow-y-auto">${escapeHtml(item.rawText || item.content)}</div>
+                </div>
+
+                <!-- 系统提取出的结构化字段 -->
+                <div>
+                  <div class="text-[11px] font-bold text-slate-500 mb-1.5">🏷️ 系统识别出的筛选字段</div>
+                  <div class="grid grid-cols-2 gap-1.5 text-[11px]">
+                    <div class="px-2.5 py-1.5 rounded-lg border ${fieldCellClass('region', evalRes)}">
+                      <span class="opacity-65">地区：</span>${escapeHtml(item.region || '未标注')}
+                    </div>
+                    <div class="px-2.5 py-1.5 rounded-lg border ${fieldCellClass('subject', evalRes)}">
+                      <span class="opacity-65">学科：</span>${escapeHtml(item.subject)}
+                    </div>
+                    <div class="px-2.5 py-1.5 rounded-lg border ${fieldCellClass('grade', evalRes)}">
+                      <span class="opacity-65">年级：</span>${escapeHtml(item.grade)}
+                    </div>
+                    <div class="px-2.5 py-1.5 rounded-lg border ${fieldCellClass('fee', evalRes)}">
+                      <span class="opacity-65">薪资：</span>${escapeHtml(feeStr)}
+                    </div>
+                    <div class="px-2.5 py-1.5 rounded-lg border col-span-2 ${fieldCellClass('timeSlot', evalRes)}">
+                      <span class="opacity-65">时段：</span>${escapeHtml(item.timeSlot)}
+                    </div>
+                    <div class="px-2.5 py-1.5 rounded-lg border ${fieldCellClass('gender', evalRes)}">
+                      <span class="opacity-65">性别：</span>${escapeHtml(item.gender || '不限')}
+                    </div>
+                    <div class="px-2.5 py-1.5 rounded-lg border ${fieldCellClass('teacherType', evalRes)}">
+                      <span class="opacity-65">师资：</span>${escapeHtml(item.teacherType || '不限')}
+                    </div>
+                    <div class="px-2.5 py-1.5 rounded-lg border ${fieldCellClass('bilingual', evalRes)}">
+                      <span class="opacity-65">双语：</span>${item.isBilingual ? '是' : '否'}
+                    </div>
+                    <div class="px-2.5 py-1.5 rounded-lg border ${fieldCellClass('international', evalRes)}">
+                      <span class="opacity-65">国际：</span>${item.isInternational ? '是' : '否'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      function renderSavedOriginsList() {
+        const listEl = document.getElementById('savedOriginsList');
+        if (state.savedOrigins.length === 0) {
+          listEl.innerHTML = `<div class="text-xs text-slate-400 text-center py-4">暂无已保存的常用起点</div>`;
+          return;
+        }
+
+        listEl.innerHTML = state.savedOrigins.map(o => {
+          const isCurrent = Math.abs(o.lat - state.origin.lat) < 0.0005 && Math.abs(o.lng - state.origin.lng) < 0.0005;
+          return `
+            <div class="flex items-center justify-between gap-2 p-2.5 rounded-xl border ${isCurrent ? 'border-emerald-400 bg-emerald-50/50' : 'border-slate-200 bg-white hover:bg-slate-50'} transition">
+              <button type="button" data-use-origin="${escapeHtml(o.id)}" class="flex-1 text-left">
+                <div class="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
+                  <span>${escapeHtml(o.label)}</span>
+                  ${isCurrent ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500 text-white">当前</span>' : ''}
+                </div>
+                <div class="text-[11px] text-slate-400 mt-0.5">${o.lat.toFixed(4)}, ${o.lng.toFixed(4)}</div>
+              </button>
+              <button type="button" data-del-origin="${escapeHtml(o.id)}" title="移除"
+                class="w-7 h-7 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500 flex items-center justify-center text-xs transition">
+                ✕
+              </button>
+            </div>
+          `;
+        }).join('');
+      }
+
+      // =========================================================================
+      // 10. 全局事件绑定
+      // =========================================================================
+      function bindEvents() {
+        // 搜索框与清除按钮
+        const searchInput = document.getElementById('searchInput');
+        const btnClearSearch = document.getElementById('btnClearSearch');
+        searchInput.addEventListener('input', (e) => {
+          state.searchKeyword = e.target.value;
+          btnClearSearch.classList.toggle('hidden', !state.searchKeyword);
+          processAndRender();
+        });
+        btnClearSearch.addEventListener('click', () => {
+          state.searchKeyword = '';
+          searchInput.value = '';
+          btnClearSearch.classList.add('hidden');
+          processAndRender();
+        });
+
+        // 快捷移除已选筛选标签
+        document.getElementById('activeFilterSummary').addEventListener('click', (e) => {
+          const btn = e.target.closest('[data-remove-filter]');
+          if (!btn) return;
+          const key = btn.dataset.removeFilter;
+          if (key === 'subject' || key === 'grade' || key === 'timeSlot') state.filters[key] = '全部';
+          else if (key === 'feeIndex') state.filters.feeIndex = 0;
+          else if (key === 'region') state.filters.region = '';
+          else state.filters[key] = '不限';
+          processAndRender();
+        });
+
+        // 删除确认弹窗按钮
+        const deleteModal = document.getElementById('deleteModal');
+        document.getElementById('btnCancelDelete').addEventListener('click', () => {
+          state.pendingDeleteId = null;
+          deleteModal.classList.add('hidden');
+        });
+        document.getElementById('btnConfirmDelete').addEventListener('click', () => {
+          if (state.pendingDeleteId !== null) {
+            state.rawRecords = state.rawRecords.filter(r => r.id !== state.pendingDeleteId);
+            saveRecords();
+            state.pendingDeleteId = null;
+            deleteModal.classList.add('hidden');
+            processAndRender();
+            showToast('已删除该条记录');
+          }
+        });
+
+        // 列表卡片点击、查看原文、一键复制与删除按钮
+        document.getElementById('cardListContainer').addEventListener('click', (e) => {
+          const viewRawBtn = e.target.closest('.btn-view-raw');
+          if (viewRawBtn) {
+            e.stopPropagation();
+            const id = Number(viewRawBtn.dataset.viewRawId);
+            const target = state.rawRecords.find(r => r.id === id);
+            if (target) {
+              state.viewingRawRecordId = id;
+              const feeStr = target.feeDisplay || (target.fee > 0 ? `¥${target.fee}/时` : '面议');
+              const exactRaw = target.rawText || (target.content || '').replace(/；/g, '\n');
+              document.getElementById('rawTextModalTitle').textContent = target.title;
+              document.getElementById('rawTextModalMeta').textContent = `${target.region || '未标注地区'} · ${target.subject} · ${target.grade} · ${feeStr}`;
+              document.getElementById('rawTextModalContent').textContent = exactRaw;
+              document.getElementById('rawTextModal').classList.remove('hidden');
+            }
+            return;
+          }
+
+          const copyRawBtn = e.target.closest('.btn-copy-raw');
+          if (copyRawBtn) {
+            e.stopPropagation();
+            const id = Number(copyRawBtn.dataset.copyRawId);
+            const target = state.rawRecords.find(r => r.id === id);
+            if (target) {
+              const exactRaw = target.rawText || (target.content || '').replace(/；/g, '\n');
+              copyTextToClipboard(exactRaw);
+            }
+            return;
+          }
+
+          const delBtn = e.target.closest('.btn-delete-card');
+          if (delBtn) {
+            e.stopPropagation();
+            const id = Number(delBtn.dataset.deleteId);
+            const target = state.rawRecords.find(r => r.id === id);
+            state.pendingDeleteId = id;
+            document.getElementById('deleteModalDesc').textContent = target
+              ? `将删除「${target.title}」，此操作无法恢复。`
+              : '删除后将从本地缓存中移除，无法恢复。';
+            document.getElementById('deleteModal').classList.remove('hidden');
+            return;
+          }
+          const card = e.target.closest('.card-item');
+          if (card) selectRecord(Number(card.dataset.cardId), false);
+        });
+
+        // 查看完整原文弹窗事件
+        const rawTextModal = document.getElementById('rawTextModal');
+        const closeRawTextModal = () => {
+          state.viewingRawRecordId = null;
+          rawTextModal.classList.add('hidden');
+        };
+        document.getElementById('btnCloseRawText').addEventListener('click', closeRawTextModal);
+        document.getElementById('btnDoneRawText').addEventListener('click', closeRawTextModal);
+        document.getElementById('btnCopyRawTextModal').addEventListener('click', () => {
+          const target = state.rawRecords.find(r => r.id === state.viewingRawRecordId);
+          if (target) {
+            const exactRaw = target.rawText || (target.content || '').replace(/；/g, '\n');
+            copyTextToClipboard(exactRaw);
+          }
+        });
+
+        // 地图顶部：当前定位
+        document.getElementById('btnLocateMe').addEventListener('click', () => {
+          if (!navigator.geolocation) {
+            showToast('当前浏览器不支持 GPS 定位，请使用点图设起点');
+            return;
+          }
+          showToast('正在获取当前位置...');
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              setOrigin(pos.coords.latitude, pos.coords.longitude, '我的当前位置');
+              showToast('已更新为当前位置');
+            },
+            () => {
+              showToast('定位被拒绝或超时，请点击「点图设起点」手动选择');
+            },
+            { timeout: 8000 }
+          );
+        });
+
+        // 地图顶部：点图设起点
+        document.getElementById('btnPickOrigin').addEventListener('click', () => {
+          state.pendingOriginNameForMap = '';
+          togglePickOriginMode(!state.isPickingOriginOnMap);
+        });
+        document.getElementById('btnCancelPickOrigin').addEventListener('click', () => {
+          state.pendingOriginNameForMap = '';
+          togglePickOriginMode(false);
+        });
+
+        // 关闭地图左下角地铁详细路线面板
+        document.getElementById('btnCloseMetroPanel').addEventListener('click', () => {
+          document.getElementById('metroRoutePanel').classList.add('hidden');
+        });
+
+        // 起点管理弹窗
+        const originModal = document.getElementById('originModal');
+        document.getElementById('btnManageOrigin').addEventListener('click', () => {
+          renderSavedOriginsList();
+          originModal.classList.remove('hidden');
+        });
+        const closeOriginModal = () => originModal.classList.add('hidden');
+        document.getElementById('btnCloseOrigin').addEventListener('click', closeOriginModal);
+        document.getElementById('btnDoneOrigin').addEventListener('click', closeOriginModal);
+
+        document.getElementById('btnAddOriginByText').addEventListener('click', () => {
+          const nameInput = document.getElementById('originNameInput');
+          const name = nameInput.value.trim();
+          if (!name) {
+            showToast('请先输入起点名称或地址');
+            return;
+          }
+          const matched = matchCoordsByText(name);
+          const lat = matched ? matched.lat : state.origin.lat;
+          const lng = matched ? matched.lng : state.origin.lng;
+          setOrigin(lat, lng, name, true);
+          nameInput.value = '';
+          renderSavedOriginsList();
+          showToast(matched ? `已匹配「${matched.matchedKey}」并保存起点` : '已用当前起点坐标保存该常用起点');
+        });
+
+        document.getElementById('btnOriginPickOnMap').addEventListener('click', () => {
+          const name = document.getElementById('originNameInput').value.trim();
+          state.pendingOriginNameForMap = name || `常用起点 ${state.savedOrigins.length + 1}`;
+          document.getElementById('originNameInput').value = '';
+          closeOriginModal();
+          togglePickOriginMode(true);
+          showToast(`请在地图上点击「${state.pendingOriginNameForMap}」的位置`);
+        });
+
+        document.getElementById('savedOriginsList').addEventListener('click', (e) => {
+          const delBtn = e.target.closest('[data-del-origin]');
+          if (delBtn) {
+            const id = delBtn.dataset.delOrigin;
+            state.savedOrigins = state.savedOrigins.filter(o => o.id !== id);
+            saveSavedOrigins();
+            renderSavedOriginsList();
+            showToast('已移除该常用起点');
+            return;
+          }
+          const useBtn = e.target.closest('[data-use-origin]');
+          if (useBtn) {
+            const target = state.savedOrigins.find(o => o.id === useBtn.dataset.useOrigin);
+            if (target) {
+              setOrigin(target.lat, target.lng, target.label);
+              closeOriginModal();
+              showToast(`已切换起点：${target.label}`);
+            }
+          }
+        });
+
+        // 筛选弹窗
+        const filterModal = document.getElementById('filterModal');
+        document.getElementById('btnOpenFilter').addEventListener('click', () => {
+          state.draftFilters = { ...state.filters };
+          renderFilterModalBody();
+          filterModal.classList.remove('hidden');
+        });
+        document.getElementById('btnCloseFilter').addEventListener('click', () => filterModal.classList.add('hidden'));
+
+        document.getElementById('filterModalBody').addEventListener('click', (e) => {
+          const chip = e.target.closest('.filter-chip');
+          if (chip) {
+            const field = chip.dataset.filterField;
+            const val = chip.dataset.isIndex === '1' ? Number(chip.dataset.filterVal) : chip.dataset.filterVal;
+            state.draftFilters[field] = val;
+            renderFilterModalBody();
+            return;
+          }
+          const quickReg = e.target.closest('[data-quick-region]');
+          if (quickReg) {
+            state.draftFilters.region = quickReg.dataset.quickRegion;
+            const input = document.getElementById('draftRegionInput');
+            if (input) input.value = state.draftFilters.region;
+          }
+        });
+
+        document.getElementById('filterModalBody').addEventListener('input', (e) => {
+          if (e.target.id === 'draftRegionInput') {
+            state.draftFilters.region = e.target.value;
+          }
+        });
+
+        document.getElementById('filterModalBody').addEventListener('change', (e) => {
+          if (e.target.id === 'draftIncludeFlexibleTime') {
+            state.draftFilters.includeFlexibleTime = e.target.checked;
+          }
+        });
+
+        document.getElementById('btnResetFilter').addEventListener('click', () => {
+          state.draftFilters = {
+            subject: '全部',
+            grade: '全部',
+            timeSlot: '全部',
+            includeFlexibleTime: true,
+            feeIndex: 0,
+            gender: '不限',
+            teacherType: '不限',
+            bilingual: '不限',
+            international: '不限',
+            region: ''
+          };
+          renderFilterModalBody();
+        });
+
+        document.getElementById('btnApplyFilter').addEventListener('click', () => {
+          state.filters = { ...state.draftFilters };
+          filterModal.classList.add('hidden');
+          processAndRender();
+        });
+
+        // 录入弹窗
+        const inputModal = document.getElementById('inputModal');
+        const closeInputModal = () => inputModal.classList.add('hidden');
+        document.getElementById('btnOpenInput').addEventListener('click', () => {
+          resetInputForm();
+          setManualEditExpanded(false);
+          inputModal.classList.remove('hidden');
+        });
+        document.getElementById('btnCloseInput').addEventListener('click', closeInputModal);
+        document.getElementById('btnCancelInput').addEventListener('click', closeInputModal);
+
+        document.getElementById('formRawText').addEventListener('input', updateBatchButtonLabel);
+
+        document.getElementById('btnToggleManualEdit').addEventListener('click', () => {
+          setManualEditExpanded(!state.isManualEditExpanded);
+        });
+
+        // 识别单条到下方微调区
+        document.getElementById('btnParseText').addEventListener('click', () => {
+          const raw = document.getElementById('formRawText').value.trim();
+          if (!raw) {
+            showToast('请先粘贴订单文字');
+            return;
+          }
+          const blocks = splitOrderBlocks(raw);
+          const parsed = parseSingleOrderText(blocks[0], 0);
+          setManualEditExpanded(true);
+
+          document.getElementById('formTitle').value = parsed.title;
+          document.getElementById('formFee').value = parsed.fee || '';
+          document.getElementById('formSubject').value = parsed.subject;
+          document.getElementById('formGrade').value = parsed.grade;
+          document.getElementById('formTimeSlot').value = parsed.timeSlot;
+          document.getElementById('formGender').value = parsed.gender;
+          document.getElementById('formTeacherType').value = parsed.teacherType;
+          document.getElementById('formRegion').value = parsed.region === '未标注地区' ? '' : parsed.region;
+          document.getElementById('formAddress').value = parsed.address;
+          document.getElementById('formBilingual').checked = parsed.isBilingual;
+          document.getElementById('formInternational').checked = parsed.isInternational;
+          setPickerCoord(parsed.latitude, parsed.longitude);
+
+          showToast(`已识别字段（时段：${parsed.timeSlot}），可微调后保存`);
+        });
+
+        // 批量 / 单条一键导入
+        document.getElementById('btnBatchImport').addEventListener('click', () => {
+          const raw = document.getElementById('formRawText').value.trim();
+          if (!raw) {
+            showToast('请先粘贴订单文字');
+            return;
+          }
+          const blocks = splitOrderBlocks(raw);
+          const newItems = blocks.map((b, idx) => parseSingleOrderText(b, idx));
+          state.rawRecords = [...newItems, ...state.rawRecords];
+          saveRecords();
+          closeInputModal();
+          processAndRender();
+          if (newItems.length > 0) selectRecord(newItems[0].id, true);
+          showToast(`成功导入 ${newItems.length} 条记录`);
+        });
+
+        // 保存手动修改的单条记录
+        document.getElementById('btnSaveRecord').addEventListener('click', () => {
+          const rawText = document.getElementById('formRawText').value.trim();
+          const subject = document.getElementById('formSubject').value;
+          const grade = document.getElementById('formGrade').value;
+          const timeSlot = document.getElementById('formTimeSlot').value;
+          const gender = document.getElementById('formGender').value;
+          const teacherType = document.getElementById('formTeacherType').value;
+          const region = document.getElementById('formRegion').value.trim() || '未标注地区';
+          const address = document.getElementById('formAddress').value.trim() || region;
+          const feeVal = Number(document.getElementById('formFee').value) || 0;
+          const isBilingual = document.getElementById('formBilingual').checked;
+          const isInternational = document.getElementById('formInternational').checked;
+
+          let title = document.getElementById('formTitle').value.trim();
+          if (!title) {
+            const shortReg = region !== '未标注地区' ? region.replace(/^[\u4e00-\u9fa5]{2,3}市/, '') : '';
+            title = [shortReg, `${grade}${subject}`].filter(Boolean).join(' ');
+          }
+
+          let lat = state.origin.lat;
+          let lng = state.origin.lng;
+          if (state.pickerCoord) {
+            lat = state.pickerCoord.lat;
+            lng = state.pickerCoord.lng;
+          } else {
+            const matched = matchCoordsByText(address) || matchCoordsByText(region);
+            if (matched) {
+              lat = matched.lat;
+              lng = matched.lng;
+            }
+          }
+
+          const newRecord = {
+            id: Date.now(),
+            title,
+            content: rawText ? rawText.replace(/\n+/g, '；') : `${grade}${subject}，${timeSlot}`,
+            rawText: rawText || `${grade}${subject}，${timeSlot}`,
+            region,
+            address,
+            latitude: lat,
+            longitude: lng,
+            subject,
+            grade,
+            timeSlot,
+            fee: feeVal,
+            feeMin: feeVal,
+            feeMax: feeVal,
+            feeDisplay: feeVal > 0 ? `¥${feeVal}/时` : '面议',
+            gender,
+            teacherType,
+            isBilingual,
+            isInternational
+          };
+
+          state.rawRecords.unshift(newRecord);
+          saveRecords();
+          closeInputModal();
+          processAndRender();
+          selectRecord(newRecord.id, true);
+          showToast('记录已保存');
+        });
+
+        // 筛选核对与比对弹窗
+        const auditModal = document.getElementById('auditModal');
+        const closeAuditModal = () => auditModal.classList.add('hidden');
+        document.getElementById('btnOpenAudit').addEventListener('click', () => {
+          state.auditTab = 'all';
+          renderAuditModal();
+          auditModal.classList.remove('hidden');
+        });
+        document.getElementById('btnCloseAudit').addEventListener('click', closeAuditModal);
+        document.getElementById('btnDoneAudit').addEventListener('click', closeAuditModal);
+
+        document.querySelectorAll('.audit-tab-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            state.auditTab = btn.dataset.auditTab;
+            renderAuditModal();
+          });
+        });
+      }
+
+      // =========================================================================
+      // 11. 应用启动入口
+      // =========================================================================
+      window.addEventListener('DOMContentLoaded', () => {
+        populateFormSelects();
+        initMainMap();
+        bindEvents();
+        processAndRender();
+      });
+    })();
+  </script>
+</body>
+</html>
